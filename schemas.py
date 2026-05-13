@@ -86,3 +86,6 @@ class ChatResponse(BaseModel):
     raw_chunks: list[dict] = Field(default_factory=list, exclude=True)  # not serialised to API
     routed_chapter: str = ""
     routed_topic: str = ""
+    question_type: str = "curriculum"   # "curriculum" or "conversational"
+    prompt_messages: list[dict] = Field(default_factory=list, exclude=True)  # exact msgs sent to LLM
+

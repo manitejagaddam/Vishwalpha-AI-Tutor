@@ -1,14 +1,13 @@
 """
 tutor/llm.py
 ────────────
-The generation layer — sends retrieved context + conversation history to the
-LLM and produces a personalised tutoring response.
+The generation layer — mode-aware, strictly grounded.
 
-Design decisions for cost/latency:
-  - Reuses a single Groq client instance (no reconnection overhead)
-  - System prompt is compact but comprehensive (~300 tokens)
-  - Uses temperature=0.4 for a balance of accuracy and naturalness
-  - max_tokens capped to prevent run-away generation costs
+Two operating modes controlled by the chat orchestrator:
+  "curriculum"     — Context is injected. System prompt FORBIDS any answer
+                     not explicitly present in the provided context.
+  "conversational" — No context. System prompt handles chitchat, follow-ups,
+                     and meta-questions using conversation history only.
 """
 
 import os
@@ -18,27 +17,53 @@ from schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# System Prompt
+# System Prompts
 # ─────────────────────────────────────────────────────────────────────────────
 
-TUTOR_SYSTEM_PROMPT = """You are VishwAlpha, a warm, knowledgeable AI tutor for Indian school students (NCERT curriculum).
+# Used when a curriculum question was asked AND confident context was retrieved.
+# Every rule is a hard constraint — the LLM must not deviate.
+CURRICULUM_SYSTEM_PROMPT = """You are VishwAlpha, a personalised AI tutor for Indian school students studying NCERT curriculum.
 
-TEACHING STYLE — adapt to what the student needs:
+TEACHING STYLES (adapt to what the student needs):
+1. **Direct Explanation** — clear, structured answers with bullet points or numbered steps.
+2. **Socratic Guidance** — ask 1-2 guiding questions to lead the student toward the answer.
+3. **Analogy & Examples** — use real-world, India-relevant examples to make concepts concrete.
+4. **Step-by-Step Breakdown** — walk through multi-step processes or problems one step at a time.
+5. **Encouraging Tone** — be patient and positive. Never make the student feel bad for not knowing.
 
-1. **Direct Explanation**: Start with a clear, structured answer. Use bullet points and numbered steps for processes.
-2. **Socratic Guidance**: When a student is exploring or confused, ask 1-2 guiding questions to lead them to the answer before revealing it.
-3. **Analogy & Examples**: Use real-world analogies and examples familiar to Indian students (everyday objects, Indian context) to make abstract concepts concrete.
-4. **Step-by-Step Breakdown**: For numerical problems or multi-step processes, walk through each step clearly.
-5. **Encouraging Tone**: Be patient and encouraging. Acknowledge what the student already knows. Never make them feel stupid.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRICT GROUNDING RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Answer ONLY using the TEXTBOOK CONTEXT provided below.
+2. If a fact, equation, definition, or example is NOT in the context — do NOT include it.
+3. Do NOT use your own training knowledge to supplement, expand, or "help" the answer.
+4. Do NOT invent examples, equations, or processes that are not explicitly in the context.
+5. If the context does not fully answer the question, say exactly:
+   "The textbook material I have doesn't cover this fully. Please ask your teacher or check your chapter."
+6. Never say things like "as we know" or "generally speaking" to introduce non-context facts.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FORMAT:
+- Use **bold** for key terms that appear in the context.
+- Use bullet points or numbered lists for processes and lists.
+- Keep answers concise — aim for quality, not length."""
+
+
+# Used for conversational messages ("yes", "ok", "what did we discuss?", follow-ups).
+# Much lighter — no strict grounding needed since there's no injected context.
+CONVERSATIONAL_SYSTEM_PROMPT = """You are VishwAlpha, a friendly, organised AI tutor for Indian school students studying the NCERT curriculum.
+
+The student has sent a conversational or planning message (a greeting, acknowledgement, follow-up, asking what to study, asking for a quiz, etc.).
+You are currently helping a Class {class_num} student studying {subject}.
 
 RULES:
-- Answer ONLY using the provided TEXTBOOK CONTEXT below. If the context does not cover the question, say: "This topic isn't covered in the materials I have right now. Could you ask about something from your textbook chapters?"
-- NEVER fabricate facts, equations, or definitions not present in the context.
-- Keep language simple and appropriate for the student's class level.
-- Use clear formatting: headers, bullet points, bold for key terms.
-- If the student asks a follow-up, reference what was discussed earlier in the conversation.
-- Keep answers concise but complete — aim for quality over length."""
+1. **Be a Helpful Guide**: If the student asks "what should I learn today?", "suggest a topic", or "what's the plan?", look at their Class ({class_num}) and Subject ({subject}) and suggest 2-3 standard NCERT topics or chapters for them to choose from. Make it sound exciting!
+2. **Follow-ups**: If the student says "yes" or "ok", acknowledge it and either ask a follow-up question related to what you were just discussing, or suggest moving to the next topic.
+3. **Summaries**: If asked "what did we discuss?", summarise the earlier conversation.
+4. **No Hallucinated Facts**: Do NOT introduce complex new factual/textbook content here. If they pick a topic, say "Great! Let's start with [Topic]. What do you already know about it?" (This will prompt them to ask a specific question, which will trigger the curriculum mode).
+5. Keep your response short, friendly, and structured. Use bullet points if suggesting topics."""
 
 
 class TutorLLM:
@@ -47,7 +72,8 @@ class TutorLLM:
 
     Usage:
         tutor = TutorLLM()
-        answer = tutor.generate(question, context, history, memory_summary)
+        answer = tutor.generate(question, context, history, memory_summary,
+                                question_type, is_grounded)
     """
 
     def __init__(self):
@@ -63,41 +89,42 @@ class TutorLLM:
         context: str,
         history: list[ChatMessage] | None = None,
         memory_summary: str = "",
-    ) -> str:
+        question_type: str = "curriculum",
+        is_grounded: bool = True,
+        class_num: int = 10,
+        subject: str = "Science",
+    ) -> tuple[str, list[dict]]:
         """
         Builds the prompt and generates a tutoring answer.
 
-        Args:
-            question       : The student's current question.
-            context        : Retrieved + compressed curriculum context from Qdrant.
-            history        : Recent conversation messages (last 2 turns, verbatim).
-            memory_summary : Compressed summary of older conversation turns.
-
         Returns:
-            The tutor's answer as a string.
+            (answer_string, prompt_messages)
+            prompt_messages is the exact list of dicts sent to the Groq API —
+            useful for debugging and the Streamlit "Prompt Inspector" panel.
         """
-        messages = self._build_messages(question, context, history, memory_summary)
+        messages = self._build_messages(
+            question, context, history, memory_summary, question_type,
+            class_num, subject
+        )
 
         try:
             response = self.client.chat.completions.create(
                 messages=messages,
                 model=self.model,
-                temperature=0.4,
-                max_tokens=1024,
+                temperature=0.3 if question_type == "curriculum" else 0.5,
+                max_tokens=800 if question_type == "curriculum" else 300,
             )
             answer = response.choices[0].message.content.strip()
             logger.info(
-                f"Generated answer: {len(answer)} chars, "
-                f"tokens used: {response.usage.total_tokens}"
+                f"Generated ({question_type}): {len(answer)} chars | "
+                f"tokens: {response.usage.total_tokens}"
             )
-            return answer
+            return answer, messages
 
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
-            return (
-                "I'm sorry, I'm having trouble generating a response right now. "
-                "Please try again in a moment."
-            )
+            fallback = "I'm having trouble responding right now. Please try again in a moment."
+            return fallback, messages
 
     def _build_messages(
         self,
@@ -105,43 +132,60 @@ class TutorLLM:
         context: str,
         history: list[ChatMessage] | None,
         memory_summary: str,
+        question_type: str,
+        class_num: int,
+        subject: str,
     ) -> list[dict]:
         """
-        Constructs the chat messages array for the Groq API.
+        Builds the Groq messages array based on question type.
 
-        Structure:
-          1. System prompt (tutor personality + rules)
-          2. System note with textbook context
-          3. (Optional) Compressed memory of older turns
-          4. Recent conversation history (last 2 turns, verbatim)
-          5. Current student question
+        For CURRICULUM:
+          [system: strict grounding prompt]
+          [system: textbook context]          ← injected as a system turn
+          [system: memory summary]            ← if available
+          [user/assistant: recent history]
+          [user: current question]
+
+        For CONVERSATIONAL:
+          [system: conversational prompt]
+          [system: memory summary]            ← if available
+          [user/assistant: recent history]
+          [user: current message]
         """
         msgs: list[dict] = []
 
-        # 1. System prompt
-        msgs.append({"role": "system", "content": TUTOR_SYSTEM_PROMPT})
+        # 1. System prompt — chosen based on question type
+        if question_type == "curriculum":
+            msgs.append({"role": "system", "content": CURRICULUM_SYSTEM_PROMPT})
+        else:
+            prompt = CONVERSATIONAL_SYSTEM_PROMPT.format(
+                class_num=class_num, subject=subject
+            )
+            msgs.append({"role": "system", "content": prompt})
 
-        # 2. Textbook context as a system-level injection
-        if context:
+        # 2. Textbook context (curriculum only) — injected as system turn BEFORE history
+        #    so it is clearly separated from the conversation.
+        if question_type == "curriculum" and context:
             msgs.append({
                 "role": "system",
                 "content": (
-                    "TEXTBOOK CONTEXT (use this to answer the student's question):\n\n"
-                    f"{context}"
+                    "━━━━━━━━ TEXTBOOK CONTEXT (your ONLY source of facts) ━━━━━━━━\n\n"
+                    f"{context}\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 ),
             })
 
-        # 3. Compressed memory of older conversation turns
+        # 3. Compressed memory of older turns (both modes can use this)
         if memory_summary:
             msgs.append({
                 "role": "system",
                 "content": (
-                    "CONVERSATION MEMORY (summary of earlier discussion):\n"
+                    "EARLIER CONVERSATION SUMMARY:\n"
                     f"{memory_summary}"
                 ),
             })
 
-        # 4. Recent history — last 2 turn pairs, sent verbatim
+        # 4. Recent history — last 2 turn pairs, verbatim
         if history:
             for msg in history:
                 role = "user" if msg.role == "student" else "assistant"

@@ -390,11 +390,21 @@ def render_message(msg: dict):
         sources = msg.get("sources", [])
         chapter = msg.get("chapter", "")
         topic = msg.get("topic", "")
+        q_type = msg.get("question_type", "curriculum")
+
+        # Agent mode badge
+        if q_type == "conversational":
+            mode_badge = "<span style='background:rgba(56,239,125,0.15);color:#38ef7d;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;margin-left:4px;'>💬 Conversational</span>"
+        else:
+            mode_badge = "<span style='background:rgba(102,126,234,0.15);color:#a0aaf0;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;margin-left:4px;'>📚 Curriculum</span>"
 
         st.markdown(f"""
         <div class="avatar-row">
           <div class="avatar tutor-avatar">🤖</div>
-          <div class="tutor-bubble">{content}</div>
+          <div class="tutor-bubble">
+            <div style='margin-bottom:8px;'>{mode_badge}</div>
+            {content}
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -415,66 +425,155 @@ def render_message(msg: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_context_panel():
-    """Shows the retrieved textbook chunks for the last tutor response."""
-    st.markdown("""
-    <div style='font-size:13px; font-weight:700; color:#667eea;
-                text-transform:uppercase; letter-spacing:0.08em; margin-bottom:12px;'>
-        📖 Retrieved Context
-    </div>
-    """, unsafe_allow_html=True)
+    """Two-tab right panel: Retrieved Chunks + Prompt Inspector."""
 
-    # Find the last tutor message that has chunks
+    # Find the last tutor message
     last_tutor = None
     for msg in reversed(st.session_state.messages):
-        if msg["role"] == "tutor" and msg.get("chunks"):
+        if msg["role"] == "tutor":
             last_tutor = msg
             break
 
-    if not last_tutor:
-        st.markdown("""
-        <div style='color:#505070; font-size:13px; text-align:center; padding:40px 0;'>
-            Ask a question to see the retrieved context here.
-        </div>
-        """, unsafe_allow_html=True)
-        return
+    tab_chunks, tab_prompt = st.tabs(["📖 Retrieved Context", "🔬 Prompt Inspector"])
 
-    chunks = last_tutor["chunks"]
-    chapter = last_tutor.get("chapter", "")
-    topic = last_tutor.get("topic", "")
-
-    # Routed metadata
-    if chapter or topic:
-        st.markdown(f"""
-        <div style='font-size:12px; color:#8888b8; margin-bottom:12px;'>
-            <b style='color:#667eea;'>Routed to:</b>
-            {f"<span style='color:#c0c0e0;'>{chapter}</span>" if chapter else ""}
-            {f" › <span style='color:#a0aaf0;'>{topic}</span>" if topic else ""}
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div style='font-size:12px; color:#606080; margin-bottom:10px;'>
-        {len(chunks)} chunk{"s" if len(chunks) != 1 else ""} retrieved
-    </div>
-    """, unsafe_allow_html=True)
-
-    for i, chunk in enumerate(chunks):
-        meta = chunk.get("metadata", {})
-        score = chunk.get("score", 0)
-        content_text = chunk.get("content", "")
-        chunk_topic = meta.get("topic", "")
-        chunk_chapter = meta.get("chapter", "")
-
-        st.markdown(f"""
-        <div class="chunk-card">
-            <div class="chunk-meta">
-                Chunk {i+1}
-                <span class="score-pill">score {score:.3f}</span>
-                {f"<span style='color:#8888b8; font-weight:400; margin-left:8px;'>· {chunk_topic}</span>" if chunk_topic else ""}
+    # ── Tab 1: Retrieved Chunks ───────────────────────────────────────────────
+    with tab_chunks:
+        if not last_tutor:
+            st.markdown("""
+            <div style='color:#505070; font-size:13px; text-align:center; padding:40px 0;'>
+                Ask a question to see the retrieved context here.
             </div>
-            <div style='white-space:pre-wrap;'>{content_text[:600]}{"..." if len(content_text) > 600 else ""}</div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
+        else:
+            chunks = last_tutor.get("chunks", [])
+            chapter = last_tutor.get("chapter", "")
+            topic   = last_tutor.get("topic", "")
+            q_type  = last_tutor.get("question_type", "curriculum")
+
+            # Routing metadata row
+            if chapter or topic:
+                st.markdown(f"""
+                <div style='font-size:12px; color:#8888b8; margin-bottom:10px;'>
+                    <b style='color:#667eea;'>Routed to:</b>
+                    {f"<span style='color:#c0c0e0;'>{chapter}</span>" if chapter else ""}
+                    {f" › <span style='color:#a0aaf0;'>{topic}</span>" if topic else ""}
+                </div>
+                """, unsafe_allow_html=True)
+
+            if not chunks:
+                color = "#38ef7d" if q_type == "conversational" else "#e0c97a"
+                label = (
+                    "💬 Conversational — no Qdrant retrieval performed."
+                    if q_type == "conversational"
+                    else "⚠️ No chunks passed the confidence threshold. Polite refusal was returned."
+                )
+                st.markdown(
+                    f"<div style='color:{color}; font-size:13px; padding:16px 0;'>{label}</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                # Confidence threshold indicator
+                passed = [c for c in chunks if c.get("score", 0) >= 0.60]
+                blocked = len(chunks) - len(passed)
+                st.markdown(f"""
+                <div style='font-size:12px; color:#606080; margin-bottom:10px;'>
+                    {len(chunks)} chunk{"s" if len(chunks) != 1 else ""} retrieved ·
+                    <span style='color:#38ef7d;'>{len(passed)} passed</span> ·
+                    <span style='color:#f87171;'>{blocked} blocked</span>
+                    <span style='color:#404060;'>(threshold 0.60)</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                for i, chunk in enumerate(chunks):
+                    meta  = chunk.get("metadata", {})
+                    score = chunk.get("score", 0)
+                    text  = chunk.get("content", "")
+                    ctopic = meta.get("topic", "")
+                    passed_gate = score >= 0.60
+                    border_color = "#667eea" if passed_gate else "#f87171"
+                    status_icon  = "✅" if passed_gate else "🚫"
+
+                    st.markdown(f"""
+                    <div class="chunk-card" style='border-left-color:{border_color};'>
+                        <div class="chunk-meta">
+                            {status_icon} Chunk {i+1}
+                            <span class="score-pill">score {score:.3f}</span>
+                            {f"<span style='color:#8888b8; font-weight:400; margin-left:8px;'>· {ctopic}</span>" if ctopic else ""}
+                        </div>
+                        <div style='white-space:pre-wrap;'>{text[:600]}{"..." if len(text) > 600 else ""}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # ── Tab 2: Prompt Inspector ───────────────────────────────────────────────
+    with tab_prompt:
+        if not last_tutor:
+            st.markdown("""
+            <div style='color:#505070; font-size:13px; text-align:center; padding:40px 0;'>
+                Ask a question to inspect the LLM prompt here.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            prompt_msgs = last_tutor.get("prompt_messages", [])
+
+            if not prompt_msgs:
+                st.markdown(
+                    "<div style='color:#606080; font-size:13px;'>No prompt data (polite refusal — LLM was not called).</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                # Summary header
+                role_counts = {}
+                total_chars = 0
+                for m in prompt_msgs:
+                    r = m.get("role", "")
+                    role_counts[r] = role_counts.get(r, 0) + 1
+                    total_chars += len(m.get("content", ""))
+
+                parts = " · ".join(f"<b>{r}</b>×{n}" for r, n in role_counts.items())
+                st.markdown(f"""
+                <div style='font-size:12px; color:#8888b8; margin-bottom:12px;'>
+                    {len(prompt_msgs)} messages · ~{total_chars // 4} tokens · {parts}
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Render each message in the prompt
+                role_colours = {
+                    "system":    ("#6c72cb", "rgba(108,114,203,0.08)", "⚙️"),
+                    "user":      ("#667eea", "rgba(102,126,234,0.08)", "👤"),
+                    "assistant": ("#38ef7d", "rgba(56,239,125,0.08)",  "🤖"),
+                }
+
+                for i, msg in enumerate(prompt_msgs):
+                    role    = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    col, bg, icon = role_colours.get(role, ("#9090b0", "rgba(144,144,176,0.08)", "❓"))
+
+                    # Truncate very long system prompts in the view (user can expand)
+                    display_content = content
+                    is_long = len(content) > 800
+                    if is_long:
+                        display_content = content[:800] + "\n\n[...truncated for display...]"
+
+                    st.markdown(f"""
+                    <div style='background:{bg}; border:1px solid {col}33;
+                                border-left:3px solid {col}; border-radius:8px;
+                                padding:10px 14px; margin:8px 0;'>
+                        <div style='font-size:11px; color:{col}; font-weight:700;
+                                    text-transform:uppercase; letter-spacing:0.06em;
+                                    margin-bottom:8px;'>
+                            {icon} [{i+1}] {role} · {len(content)} chars
+                        </div>
+                        <div style='font-family:"Fira Code",monospace; font-size:12px;
+                                    color:#c0c0d8; line-height:1.7;
+                                    white-space:pre-wrap; word-break:break-word;'
+                        >{display_content}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if is_long:
+                        with st.expander(f"Show full message [{i+1}] ({len(content)} chars)"):
+                            st.code(content, language=None)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -528,6 +627,8 @@ def handle_input(question: str):
                 "chunks": response.raw_chunks,
                 "chapter": response.routed_chapter,
                 "topic": response.routed_topic,
+                "question_type": response.question_type,
+                "prompt_messages": response.prompt_messages,
             })
 
             # Update memory summary in sidebar
