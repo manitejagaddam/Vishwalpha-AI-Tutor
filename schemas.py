@@ -47,3 +47,42 @@ class CanonicalCurriculum(BaseModel):
     sections: list[ProcessedSection]
 
     model_config = {"populate_by_name": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat / Tutor API Models
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    """A single message in a conversation (student or tutor)."""
+    role: str          # "student" or "tutor"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """Incoming request from the frontend to the /chat endpoint."""
+    session_id: str = Field(
+        default="",
+        description="Conversation session ID. Leave empty for a new session.",
+    )
+    question: str
+    class_num: int = Field(default=10, description="Student's class level, e.g. 10")
+    subject: str = Field(default="Science", description="Subject name")
+
+
+class SourceInfo(BaseModel):
+    """Metadata about a curriculum source used in the answer."""
+    chapter: str
+    topic: str
+    score: float
+
+
+class ChatResponse(BaseModel):
+    """Response returned by the /chat endpoint."""
+    session_id: str
+    answer: str
+    sources: list[SourceInfo] = Field(default_factory=list)
+    conversation_length: int = 0
+    raw_chunks: list[dict] = Field(default_factory=list, exclude=True)  # not serialised to API
+    routed_chapter: str = ""
+    routed_topic: str = ""

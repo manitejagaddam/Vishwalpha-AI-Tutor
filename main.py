@@ -1,29 +1,39 @@
 """
 main.py
 ───────
-Entry point for the AI Tutor Curriculum Engine.
+Entry point for the VishwAlpha AI Tutor.
+
+Usage:
+  python main.py --serve       Start the FastAPI server (default: port 8000)
+  python main.py --ingest      Run the PDF ingestion pipeline
+  python main.py               Interactive CLI chat for testing
 
 Module layout:
-  schemas.py              — Pydantic models (ProcessedSection, CanonicalCurriculum)
+  schemas.py              — Pydantic models (ingestion + chat)
+  api.py                  — FastAPI endpoints (/chat, /history, /health)
+  tutor/
+    llm.py                — TutorLLM (system prompt + Groq generation)
+    chat.py               — Chat orchestrator (retrieval → LLM → memory)
   ingestion/
-    parser.py             — PDF parsing with font/layout metadata
+    pipeline.py           — PDF ingestion flow
+    parser.py             — PDF parsing with layout metadata
     structurer.py         — Deterministic section boundary detection
-    cleaner.py            — Text noise removal (footers, OCR artifacts)
-    llm_repair.py         — LLM repair: heading + cleaned text + summary per section
-    pipeline.py           — Orchestrates the full ingestion flow
+    cleaner.py            — Text noise removal
+    llm_repair.py         — LLM repair: heading + cleaned text + summary
   db/
     models.py             — SQLAlchemy ORM models
     database.py           — DB engine and session factory
-    writer.py             — PostgreSQL persistence (Board→Class→Subject→Chapter→Topic→Chunk)
+    writer.py             — PostgreSQL curriculum persistence
+    memory.py             — Conversation memory (history + LLM compression)
   routing/
     embedder.py           — Sentence embedding (BGE-small)
     vector_store.py       — Qdrant curriculum_routing collection
     router.py             — Semantic routing: query → curriculum topic
   retrieval/
-    engine.py             — Qdrant curriculum_content collection + retrieval
-    reranker.py           — Context compression / reranking
+    engine.py             — Qdrant curriculum_content + retrieval
+    reranker.py           — Context compression
     cache.py              — Redis query cache
-    query.py              — Student query flow (route → retrieve → compress)
+    query.py              — Retrieval flow (route → retrieve → compress)
 """
 
 import sys
@@ -41,17 +51,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from db.database import init_db
-from ingestion.pipeline import ingest_pdf
-from retrieval.query import query_system
 
-# Ensure all PostgreSQL tables exist before anything runs
+# Ensure all PostgreSQL tables exist
 init_db()
 
 
-if __name__ == "__main__":
-    logger.info("AI Tutor Curriculum Engine v3.0")
+def run_server():
+    """Start the FastAPI server."""
+    import uvicorn
+    logger.info("Starting VishwAlpha AI Tutor API server...")
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
 
-    # ── Ingest a chapter ───────────────────────────────────────────────────────
+
+def run_ingest():
+    """Run the PDF ingestion pipeline."""
+    from ingestion.pipeline import ingest_pdf
+
     ingest_pdf(
         pdf_path="DataSet/Class_10/Science/chapter_1.pdf",
         class_num=10,
@@ -59,8 +74,58 @@ if __name__ == "__main__":
         chapter="Chemical Reactions and Equations",
     )
 
-    # ── Query the system ───────────────────────────────────────────────────────
-    context = query_system("What is rancidity?")
-    if context:
-        print("\n--- Compressed Context ---")
-        print(context)
+
+def run_interactive_chat():
+    """Interactive CLI chat for quick testing."""
+    from schemas import ChatRequest
+    from tutor.chat import chat
+
+    print("\n╔══════════════════════════════════════════════════════╗")
+    print("║      VishwAlpha AI Tutor — Interactive Mode         ║")
+    print("║      Type 'quit' or 'exit' to stop                  ║")
+    print("║      Type 'new' to start a new session              ║")
+    print("╚══════════════════════════════════════════════════════╝\n")
+
+    session_id = ""
+
+    while True:
+        try:
+            question = input("Student > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not question:
+            continue
+        if question.lower() in ("quit", "exit"):
+            print("Goodbye!")
+            break
+        if question.lower() == "new":
+            session_id = ""
+            print("🆕 Starting a new session.\n")
+            continue
+
+        request = ChatRequest(
+            session_id=session_id,
+            question=question,
+            class_num=10,
+            subject="Science",
+        )
+
+        response = chat(request)
+        session_id = response.session_id  # keep the session alive
+
+        print(f"\nTutor > {response.answer}")
+        if response.sources:
+            sources_str = ", ".join(f"{s.topic} ({s.score})" for s in response.sources)
+            print(f"  📚 Sources: {sources_str}")
+        print(f"  💬 Turn #{response.conversation_length // 2}\n")
+
+
+if __name__ == "__main__":
+    if "--serve" in sys.argv:
+        run_server()
+    elif "--ingest" in sys.argv:
+        run_ingest()
+    else:
+        run_interactive_chat()

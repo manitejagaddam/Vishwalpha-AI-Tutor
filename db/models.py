@@ -62,3 +62,46 @@ class ContentChunk(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     topic = relationship("Topic", back_populates="chunks")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation Memory
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConversationSession(Base):
+    """
+    Groups a series of student ↔ tutor exchanges into one conversation.
+    A session is created when the student starts chatting and persists
+    across multiple turns until they start a new one.
+    """
+    __tablename__ = "conversation_sessions"
+    id = Column(String(100), primary_key=True)              # UUID session_id
+    class_num = Column(Integer, nullable=True)
+    subject = Column(String(100), nullable=True)
+    summary = Column(Text, nullable=True)                   # compressed memory of older turns
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    messages = relationship(
+        "ConversationMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ConversationMessage.created_at",
+    )
+
+
+class ConversationMessage(Base):
+    """
+    A single message in a conversation — either from the student or the tutor.
+    Stores the context and routing metadata for debugging / audit.
+    """
+    __tablename__ = "conversation_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(100), ForeignKey("conversation_sessions.id"), nullable=False)
+    role = Column(String(20), nullable=False)                # "student" or "tutor"
+    content = Column(Text, nullable=False)
+    context_used = Column(Text, nullable=True)               # retrieved context (for audit)
+    routed_topic = Column(String(200), nullable=True)        # which topic was matched
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    session = relationship("ConversationSession", back_populates="messages")
