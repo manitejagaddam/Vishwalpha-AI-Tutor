@@ -1,0 +1,30 @@
+FROM python:3.10-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies required for OpenCV, PostgreSQL, and PaddleOCR
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency resolution
+RUN pip install --no-cache-dir uv
+
+# Copy project specification
+COPY pyproject.toml ./
+
+# Install dependencies into the system python environment
+RUN uv pip install --system -e .
+
+# Copy the rest of the application
+COPY . .
+
+# Expose FastAPI default port
+EXPOSE 8000
+
+# Run the FastAPI application using uvicorn
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # The FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: vishwalpha-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    # Map the DATABASE_URL to point to the local postgres container by default,
+    # or you can override this in your .env file
+    environment:
+      - DATABASE_URL=postgresql://vishwalpha:password@db:5432/vishwalpha_tutor
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data  # Mount data directory if needed for PDF uploads
+
+  # The Streamlit Frontend
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: vishwalpha-streamlit
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # PostgreSQL Database for chat history and curriculum metadata
+  db:
+    image: postgres:15-alpine
+    container_name: vishwalpha-postgres
+    environment:
+      POSTGRES_USER: vishwalpha
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: vishwalpha_tutor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Qdrant Vector Database for RAG context
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: vishwalpha-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  # Redis for Semantic Router caching
+  redis:
+    image: redis:7-alpine
+    container_name: vishwalpha-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
