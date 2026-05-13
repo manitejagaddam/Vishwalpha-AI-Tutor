@@ -59,7 +59,7 @@ if __name__ == "__main__":
         chapter="Chemical Reactions and Equations",
     )
 
-    # ── Query the system ───────────────────────────────────────────────────────
+    # # ── Query the system ───────────────────────────────────────────────────────
     context = query_system("What is rancidity?")
     if context:
         print("\n--- Compressed Context ---")
