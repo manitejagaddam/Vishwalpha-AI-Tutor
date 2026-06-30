@@ -66,6 +66,59 @@ RULES:
 5. Keep your response short, friendly, and structured. Use bullet points if suggesting topics."""
 
 
+def format_personalization_instructions(metrics: dict | None, cognitive_skills: dict | None) -> str:
+    if not metrics or not cognitive_skills:
+        return ""
+
+    # Extract the 5 mapped skills
+    concept_under = cognitive_skills.get("concept_understanding", 50.0)
+    effort = cognitive_skills.get("learning_effort", 50.0)
+    adaptability = cognitive_skills.get("learning_adaptability", 50.0)
+    stability = cognitive_skills.get("knowledge_stability", 50.0)
+    depth = cognitive_skills.get("cognitive_depth", 50.0)
+
+    # Extract specific raw metrics for fine-tuning
+    err_rep = metrics.get("error_repetition_rate", 0.2)
+
+    instructions = f"""
+━━━━━━━━ STUDENT PROFILE & PERSONALIZATION RULES ━━━━━━━━
+Current Cognitive Skill Levels:
+- Concept Understanding: {concept_under}% (Grasp of factual and textbook knowledge)
+- Learning Effort: {effort}% (Engagement depth, question complexity, persistence)
+- Learning Adaptability: {adaptability}% (Ability to recover from mistakes and process corrections)
+- Knowledge Stability: {stability}% (Memory retention of concepts and progress speed)
+- Cognitive Depth: {depth}% (Bloom's Taxonomy stage, e.g., Recall -> Analyze)
+
+Pedagogy Adaptation Guidelines:
+"""
+    # 1. Concept Understanding rules
+    if concept_under < 40:
+        instructions += "- Concept Understanding is LOW. Explain definitions in very basic terms. Avoid complex jargon. Use simple analogies first.\n"
+    elif concept_under > 75:
+        instructions += "- Concept Understanding is HIGH. Do not over-explain basic terms. Introduce advanced terms and deeper context.\n"
+
+    # 2. Learning Effort rules
+    if effort < 40:
+        instructions += "- Learning Effort is LOW. Keep explanations punchy and brief to maintain interest. Do not write massive paragraphs.\n"
+    elif effort > 75:
+        instructions += "- Learning Effort is HIGH. Provide detailed, comprehensive answers with rich academic depth.\n"
+
+    # 3. Learning Adaptability / Error repetition rules
+    if adaptability < 40 or err_rep > 0.4:
+        instructions += "- Learning Adaptability is LOW / Error Repetition is HIGH. Repeat key corrective points clearly. Highlight common mistakes to watch out for. Walk through corrections step-by-step.\n"
+    elif adaptability > 75:
+        instructions += "- Learning Adaptability is HIGH. Highlight only subtle nuances; the student processes corrections easily.\n"
+
+    # 4. Cognitive Depth rules (Bloom's Taxonomy)
+    if depth < 30:
+        instructions += "- Cognitive Depth is Recall-level. Provide clear definitions, facts, and structure. Use bullet points.\n"
+    elif depth > 70:
+        instructions += "- Cognitive Depth is analytical/evaluative. Guide the student using Socratic prompting, challenge their assumptions, and ask them to analyze or compare concepts.\n"
+
+    instructions += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return instructions
+
+
 class TutorLLM:
     """
     Generates personalised tutoring answers using Groq LLM.
@@ -73,7 +126,7 @@ class TutorLLM:
     Usage:
         tutor = TutorLLM()
         answer = tutor.generate(question, context, history, memory_summary,
-                                question_type, is_grounded)
+                                question_type, is_grounded, metrics, cognitive_skills)
     """
 
     def __init__(self):
@@ -93,6 +146,8 @@ class TutorLLM:
         is_grounded: bool = True,
         class_num: int = 10,
         subject: str = "Science",
+        metrics: dict | None = None,
+        cognitive_skills: dict | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Builds the prompt and generates a tutoring answer.
@@ -104,7 +159,7 @@ class TutorLLM:
         """
         messages = self._build_messages(
             question, context, history, memory_summary, question_type,
-            class_num, subject
+            class_num, subject, metrics, cognitive_skills
         )
 
         try:
@@ -135,22 +190,11 @@ class TutorLLM:
         question_type: str,
         class_num: int,
         subject: str,
+        metrics: dict | None = None,
+        cognitive_skills: dict | None = None,
     ) -> list[dict]:
         """
         Builds the Groq messages array based on question type.
-
-        For CURRICULUM:
-          [system: strict grounding prompt]
-          [system: textbook context]          ← injected as a system turn
-          [system: memory summary]            ← if available
-          [user/assistant: recent history]
-          [user: current question]
-
-        For CONVERSATIONAL:
-          [system: conversational prompt]
-          [system: memory summary]            ← if available
-          [user/assistant: recent history]
-          [user: current message]
         """
         msgs: list[dict] = []
 
@@ -163,8 +207,12 @@ class TutorLLM:
             )
             msgs.append({"role": "system", "content": prompt})
 
+        # 1b. Injected Personalization Prompt based on cognitive metrics and skills
+        pers_prompt = format_personalization_instructions(metrics, cognitive_skills)
+        if pers_prompt:
+            msgs.append({"role": "system", "content": pers_prompt})
+
         # 2. Textbook context (curriculum only) — injected as system turn BEFORE history
-        #    so it is clearly separated from the conversation.
         if question_type == "curriculum" and context:
             msgs.append({
                 "role": "system",
@@ -195,3 +243,4 @@ class TutorLLM:
         msgs.append({"role": "user", "content": question})
 
         return msgs
+
