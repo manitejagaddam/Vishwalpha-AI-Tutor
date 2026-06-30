@@ -1,3 +1,9 @@
+import os
+from dotenv import load_dotenv
+
+# Load environment variables early so Hugging Face client sees the HF_TOKEN
+load_dotenv()
+
 from sentence_transformers import SentenceTransformer
 
 class Embedder:
@@ -7,7 +13,12 @@ class Embedder:
         # Initialize BGE-small locally only once
         if model_name not in Embedder._model_cache:
             print(f"Loading embedding model: {model_name}")
-            Embedder._model_cache[model_name] = SentenceTransformer(model_name)
+            hf_token = os.environ.get("HF_TOKEN")
+            # Pass HF_TOKEN to ensure authenticated/faster download from HF Hub
+            Embedder._model_cache[model_name] = SentenceTransformer(
+                model_name, 
+                token=hf_token
+            )
         self.model = Embedder._model_cache[model_name]
 
     def embed_document(self, text: str) -> list[float]:

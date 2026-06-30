@@ -8,7 +8,13 @@ load_dotenv()
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+if not DATABASE_URL:
+    raise ValueError(
+        "DATABASE_URL environment variable is not set. "
+        "Please create a .env file and define DATABASE_URL (e.g. postgresql://user:pass@localhost:5432/dbname)."
+    )
+
+if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # Using psycopg2 as the driver

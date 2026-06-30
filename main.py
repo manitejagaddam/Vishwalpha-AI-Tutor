@@ -68,10 +68,10 @@ def run_ingest():
     from ingestion.pipeline import ingest_pdf
 
     ingest_pdf(
-        pdf_path="DataSet/Class_10/Science/chapter_1.pdf",
+        pdf_path="DataSet/Class_10/Science/chapter_2.pdf",
         class_num=10,
         subject="Science",
-        chapter="Chemical Reactions and Equations",
+        chapter="Acids, Bases and Salts",
     )
 
 

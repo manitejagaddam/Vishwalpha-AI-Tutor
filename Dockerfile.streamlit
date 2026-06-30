@@ -14,17 +14,20 @@ RUN apt-get update && apt-get install -y \
 # Install uv for fast dependency resolution
 RUN pip install --no-cache-dir uv
 
-# Copy project specification
-COPY pyproject.toml ./
+# Copy project specification and lockfile to cache dependencies layer
+COPY pyproject.toml uv.lock ./
 
 # Install dependencies into the system python environment
-RUN uv pip install --system -e .
+RUN uv pip install --system -r pyproject.toml
 
 # Copy the rest of the application
 COPY . .
 
+# Install the project itself (non-editable for production publishing)
+RUN uv pip install --system .
+
 # Expose Streamlit default port
 EXPOSE 8501
 
-# Run the Streamlit application
+# Run the Streamlit application in production mode
 CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
