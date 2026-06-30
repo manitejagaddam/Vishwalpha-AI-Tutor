@@ -88,4 +88,14 @@ class ChatResponse(BaseModel):
     routed_topic: str = ""
     question_type: str = "curriculum"   # "curriculum" or "conversational"
     prompt_messages: list[dict] = Field(default_factory=list, exclude=True)  # exact msgs sent to LLM
+    metrics: dict = Field(default_factory=dict)
+    metrics_adjustments: dict = Field(default_factory=dict)
+    cognitive_skills: dict = Field(default_factory=dict)
+
+
+class UpdateMetricsRequest(BaseModel):
+    """Request to manually adjust session metrics or apply a profile preset."""
+    metrics: dict | None = None
+    profile_name: str | None = None
+
 
