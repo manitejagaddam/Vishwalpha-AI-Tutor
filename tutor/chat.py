@@ -18,7 +18,7 @@ import os
 import logging
 from groq import Groq
 from schemas import ChatRequest, ChatResponse, SourceInfo
-from db.memory import get_or_create_session, get_history, save_turn
+from db.memory import get_or_create_session, get_history, save_turn, get_session_metrics
 from tutor.llm import TutorLLM
 
 logger = logging.getLogger(__name__)
@@ -187,14 +187,18 @@ def chat(request: ChatRequest) -> ChatResponse:
     Agent-style chat flow:
 
       1. Get/create session + load conversation memory
-      2. Classify question: "curriculum" or "conversational"
-      3a. [conversational] → generate from history only
-      3b. [curriculum]     → retrieve from Qdrant (with confidence gate)
+      2. Run Cognitive Middleware (pre-generation metrics evaluation & adjustment)
+      3. Classify question: "curriculum" or "conversational"
+      4a. [conversational] → generate from history only
+      4b. [curriculum]     → retrieve from Qdrant (with confidence gate)
                           → if no confident chunks: return "not in my materials"
                           → else: generate strictly from retrieved context
-      4. Persist turn to PostgreSQL
-      5. Return ChatResponse
+      5. Persist turn to PostgreSQL
+      6. Return ChatResponse
     """
+    from db.database import SessionLocal
+    from db.metrics import adjust_student_metrics_pre_generation, compute_cognitive_skills
+
     # ── 1. Session + memory ───────────────────────────────────────────────────
     session_id = get_or_create_session(
         session_id=request.session_id,
@@ -209,7 +213,25 @@ def chat(request: ChatRequest) -> ChatResponse:
         f"Recent: {len(recent_history)} messages"
     )
 
-    # ── 2. Classify ───────────────────────────────────────────────────────────
+    # ── 2. Cognitive Middleware (Pre-generation) ──────────────────────────────
+    db = SessionLocal()
+    metrics_adjustments = {}
+    try:
+        metrics_adjustments = adjust_student_metrics_pre_generation(
+            session_id=session_id,
+            question=request.question,
+            history=recent_history,
+            memory_summary=memory_summary,
+            db=db
+        )
+    finally:
+        db.close()
+
+    # Load the updated metrics and compute cognitive skills
+    metrics = get_session_metrics(session_id)
+    cognitive_skills = compute_cognitive_skills(metrics)
+
+    # ── 3. Classify ───────────────────────────────────────────────────────────
     # Build a brief history preview for the classifier
     history_preview = "\n".join(
         f"{m.role.capitalize()}: {m.content}" for m in recent_history[-4:]
@@ -217,7 +239,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     question_type = _classify_question(request.question, history_preview)
     logger.info(f"Question classified as: '{question_type}'")
 
-    # ── 3. Route by classification ────────────────────────────────────────────
+    # ── 4. Route by classification ────────────────────────────────────────────
     context = ""
     sources: list[SourceInfo] = []
     raw_chunks: list[dict] = []
@@ -257,9 +279,12 @@ def chat(request: ChatRequest) -> ChatResponse:
                 raw_chunks=raw_chunks,
                 routed_chapter=route.get("chapter", "") if route else "",
                 routed_topic=route.get("topic", "") if route else "",
+                metrics=metrics,
+                metrics_adjustments=metrics_adjustments,
+                cognitive_skills=cognitive_skills,
             )
 
-    # ── 4. Generate ───────────────────────────────────────────────────────────
+    # ── 5. Generate (personalized via metrics & cognitive skills) ─────────────
     tutor = _get_tutor()
     answer, prompt_messages = tutor.generate(
         question=request.question,
@@ -270,10 +295,12 @@ def chat(request: ChatRequest) -> ChatResponse:
         is_grounded=is_grounded,
         class_num=request.class_num,
         subject=request.subject,
+        metrics=metrics,
+        cognitive_skills=cognitive_skills,
     )
 
 
-    # ── 5. Persist ────────────────────────────────────────────────────────────
+    # ── 6. Persist ────────────────────────────────────────────────────────────
     routed_topic = sources[0].topic if sources else (route.get("topic", "") if route else "")
     total_messages = save_turn(
         session_id=session_id,
@@ -283,7 +310,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         routed_topic=routed_topic,
     )
 
-    # ── 6. Return ─────────────────────────────────────────────────────────────
+    # ── 7. Return ─────────────────────────────────────────────────────────────
     return ChatResponse(
         session_id=session_id,
         answer=answer,
@@ -294,4 +321,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         routed_topic=route.get("topic", "") if route else "",
         question_type=question_type,
         prompt_messages=prompt_messages,
+        metrics=metrics,
+        metrics_adjustments=metrics_adjustments,
+        cognitive_skills=cognitive_skills,
     )

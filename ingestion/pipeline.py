@@ -7,8 +7,8 @@ Flow:
   PDF → Parse → TextStructurer (raw sections)
       → LLMStructureRepair.repair_section() per section
           → heading + repaired_text + summary + keywords
-      → Qdrant curriculum_routing  (summary embedding, for semantic routing)
-      → Qdrant curriculum_content  (repaired text embedding, for RAG retrieval)
+      → Pg-vector curriculum_routing  (summary embedding, for semantic routing)
+      → Pg-vector curriculum_content  (repaired text embedding, for RAG retrieval)
       → PostgreSQL                 (structured hierarchy storage)
       → canonical JSON export      (snapshot of everything ingested)
 """
@@ -47,7 +47,7 @@ def ingest_pdf(pdf_path: str, class_num: int, subject: str, chapter: str) -> Non
         logger.error("No sections detected. Aborting ingestion.")
         return
 
-    # ── STEP 2: LLM Repair + Qdrant Storage ──────────────────────────────────
+    # ── STEP 2: LLM Repair + Pg-vector Storage ──────────────────────────────────
     processed_sections = _repair_and_store(
         raw_sections=raw_sections,
         class_num=class_num,
@@ -69,7 +69,7 @@ def ingest_pdf(pdf_path: str, class_num: int, subject: str, chapter: str) -> Non
     logger.info("=" * 60)
     logger.info(
         f"INGESTION COMPLETE: {len(processed_sections)} sections "
-        f"saved to PostgreSQL + Qdrant"
+        f"saved to PostgreSQL + Pg-vector"
     )
     logger.info("=" * 60)
 
@@ -124,12 +124,14 @@ def _repair_and_store(
     """
     Step 2 of the pipeline — for each raw section:
       1. Sends raw content to the LLM → repairs text + generates heading + summary.
-      2. Embeds the summary into Qdrant `curriculum_routing` (for semantic routing).
-      3. Embeds the repaired text into Qdrant `curriculum_content` (for RAG retrieval).
+      2. Embeds the summary into 
+      
+       `curriculum_routing` (for semantic routing).
+      3. Embeds the repaired text into Pg-vector `curriculum_content` (for RAG retrieval).
 
     Returns the list of ProcessedSection objects ready for DB storage.
     """
-    logger.info("STEP 2: LLM repair + Qdrant storage (one call per section)...")
+    logger.info("STEP 2: LLM repair + Pg-vector storage (one call per section)...")
 
     repairer = LLMStructureRepair()
     router = SemanticRouter()
@@ -163,7 +165,7 @@ def _repair_and_store(
         )
         processed.append(section)
 
-        # Qdrant routing — embed summary so the router can map queries to topics
+        # Pg-vector routing — embed summary so the router can map queries to topics
         router.add_route(
             class_num=class_num,
             subject=subject,
@@ -172,7 +174,7 @@ def _repair_and_store(
             summary=section.summary,
         )
 
-        # Qdrant content — embed repaired text for RAG retrieval
+        # Pg-vector content — embed repaired text for RAG retrieval
         retrieval_engine.upsert_chunk(
             metadata={
                 "class": class_num,
@@ -184,7 +186,7 @@ def _repair_and_store(
         )
 
         logger.info(
-            f"  ✓ \"{section.heading}\" → Qdrant routing + content stored"
+            f"  ✓ \"{section.heading}\" → Pg-vector routing + content stored"
         )
 
     return processed
