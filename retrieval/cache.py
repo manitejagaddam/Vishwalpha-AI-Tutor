@@ -6,7 +6,12 @@ class QueryCache:
     def __init__(self):
         redis_url = os.environ.get("REDIS_URL")
         if redis_url:
-            self.redis_client = redis.Redis.from_url(redis_url)
+            try:
+                self.redis_client = redis.Redis.from_url(redis_url, socket_timeout=2.0)
+                self.redis_client.ping()
+            except Exception as e:
+                print(f"WARNING: Could not connect to Redis ({e}). Caching disabled.")
+                self.redis_client = None
         else:
             print("WARNING: Redis URL not found. Caching disabled.")
             self.redis_client = None

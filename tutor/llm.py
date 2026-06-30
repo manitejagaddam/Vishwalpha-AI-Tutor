@@ -148,6 +148,7 @@ class TutorLLM:
         subject: str = "Science",
         metrics: dict | None = None,
         cognitive_skills: dict | None = None,
+        student_memory: list[str] | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Builds the prompt and generates a tutoring answer.
@@ -159,7 +160,7 @@ class TutorLLM:
         """
         messages = self._build_messages(
             question, context, history, memory_summary, question_type,
-            class_num, subject, metrics, cognitive_skills
+            class_num, subject, metrics, cognitive_skills, student_memory
         )
 
         try:
@@ -192,6 +193,7 @@ class TutorLLM:
         subject: str,
         metrics: dict | None = None,
         cognitive_skills: dict | None = None,
+        student_memory: list[str] | None = None,
     ) -> list[dict]:
         """
         Builds the Groq messages array based on question type.
@@ -223,7 +225,18 @@ class TutorLLM:
                 ),
             })
 
-        # 3. Compressed memory of older turns (both modes can use this)
+        # 3b. Persistent student memory (cross-session facts)
+        if student_memory:
+            mem_lines = "\n".join(f"- {m}" for m in student_memory)
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "STUDENT MEMORY (persistent facts about this student — use to personalise responses):\n"
+                    f"{mem_lines}"
+                ),
+            })
+
+        # 4. Compressed memory of older turns (both modes can use this)
         if memory_summary:
             msgs.append({
                 "role": "system",

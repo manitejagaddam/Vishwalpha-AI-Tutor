@@ -13,13 +13,14 @@ This balances quality (recent context is exact) with cost/space
 """
 
 import os
+import json
 import uuid
 import logging
+from datetime import datetime, timedelta
 from groq import Groq
 from db.database import SessionLocal
 from db.models import ConversationSession, ConversationMessage
 from schemas import ChatMessage
-from db.metrics import update_student_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,13 @@ def _get_groq() -> Groq:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_or_create_session(
+    student_id: str,
     session_id: str = "",
     class_num: int | None = None,
     subject: str | None = None,
 ) -> str:
     """
-    Returns an existing session_id or creates a new session.
+    Returns an existing session_id or creates a new session linked to a student.
     If session_id is empty/None, generates a new UUID.
     """
     db = SessionLocal()
@@ -59,12 +61,13 @@ def get_or_create_session(
         if not existing:
             session = ConversationSession(
                 id=session_id,
+                student_id=student_id,
                 class_num=class_num,
                 subject=subject,
             )
             db.add(session)
             db.commit()
-            logger.info(f"Created new session: {session_id}")
+            logger.info(f"Created new session: {session_id} for student {student_id}")
         else:
             logger.info(f"Resuming session: {session_id}")
 
@@ -92,7 +95,8 @@ def get_history(session_id: str) -> tuple[str, list[ChatMessage]]:
         if not session:
             return "", []
 
-        messages = session.messages  # already ordered by created_at (relationship)
+        # Filter out archived messages and sort
+        messages = sorted([m for m in session.messages if not m.is_archived], key=lambda x: x.created_at)
 
         # Last 2 turn pairs = last 4 messages (student, tutor, student, tutor)
         recent_cutoff = 4
@@ -104,6 +108,58 @@ def get_history(session_id: str) -> tuple[str, list[ChatMessage]]:
         memory_summary = session.summary or ""
 
         return memory_summary, recent_msgs
+    finally:
+        db.close()
+
+
+def get_full_session_messages(session_id: str) -> list[dict]:
+    """
+    Returns all messages for a session formatted for Streamlit UI.
+    """
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        if not session:
+            return []
+        
+        messages = sorted([m for m in session.messages if not m.is_archived], key=lambda x: x.created_at)
+        return [
+            {
+                "role": "user" if m.role == "student" else "assistant",
+                "content": m.content,
+                "sources": [],
+                "chunks": [],
+                "chapter": "",
+                "topic": m.routed_topic or ""
+            }
+            for m in messages
+        ]
+    finally:
+        db.close()
+
+
+def get_student_sessions(student_id: str, subject: str) -> list[dict]:
+    """
+    Returns a list of past sessions for a student and subject, ordered by most recent first.
+    """
+    db = SessionLocal()
+    try:
+        sessions = db.query(ConversationSession).filter(
+            ConversationSession.student_id == student_id,
+            ConversationSession.subject == subject
+        ).order_by(ConversationSession.updated_at.desc()).all()
+        
+        return [
+            {
+                "id": s.id,
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+                "message_count": len(s.messages)
+            }
+            for s in sessions
+        ]
     finally:
         db.close()
 
@@ -156,30 +212,26 @@ def save_turn(
         db.close()
 
 
-def update_session_metrics_directly(session_id: str, metrics_dict: dict) -> None:
+def archive_old_messages(days: int = 5) -> int:
     """
-    Directly updates the session metrics (for manual adjustments or presets).
+    Marks messages older than the specified number of days as archived.
+    Returns the number of messages archived.
     """
     db = SessionLocal()
     try:
-        session = db.query(ConversationSession).filter(ConversationSession.id == session_id).first()
-        if session:
-            for key, val in metrics_dict.items():
-                if hasattr(session, key):
-                    # Clip values appropriately
-                    limit_min = 0.0
-                    limit_max = 1.0 if key == "error_repetition_rate" else 100.0
-                    try:
-                        f_val = float(val)
-                        clipped = max(limit_min, min(limit_max, f_val))
-                        setattr(session, key, clipped)
-                    except (ValueError, TypeError):
-                        pass
-            db.commit()
-            logger.info(f"Directly updated metrics for session {session_id}.")
+        cutoff = datetime.now() - timedelta(days=days)
+        # We can do a bulk update
+        archived_count = db.query(ConversationMessage).filter(
+            ConversationMessage.created_at < cutoff,
+            ConversationMessage.is_archived == False
+        ).update({"is_archived": True})
+        
+        db.commit()
+        if archived_count > 0:
+            logger.info(f"Archived {archived_count} messages older than {days} days.")
+        return archived_count
     finally:
         db.close()
-
 
 
 def get_session_message_count(session_id: str) -> int:
@@ -192,30 +244,6 @@ def get_session_message_count(session_id: str) -> int:
     finally:
         db.close()
 
-
-def get_session_metrics(session_id: str) -> dict:
-    """Returns the current student learning metrics for a session."""
-    db = SessionLocal()
-    try:
-        session = db.query(ConversationSession).filter(
-            ConversationSession.id == session_id
-        ).first()
-        if not session:
-            return {}
-        return {
-            "concept_master_score": session.concept_master_score if session.concept_master_score is not None else 50.0,
-            "error_repetition_rate": session.error_repetition_rate if session.error_repetition_rate is not None else 0.0,
-            "attempt_persistence": session.attempt_persistence if session.attempt_persistence is not None else 50.0,
-            "struggle_recovery_rate": session.struggle_recovery_rate if session.struggle_recovery_rate is not None else 50.0,
-            "practice_intensity": session.practice_intensity if session.practice_intensity is not None else 50.0,
-            "learning_velocity": session.learning_velocity if session.learning_velocity is not None else 50.0,
-            "knowledge_retention": session.knowledge_retention if session.knowledge_retention is not None else 50.0,
-            "cognitive_thinking_level": session.cognitive_thinking_level if session.cognitive_thinking_level is not None else 50.0,
-            "engagement_frequency": session.engagement_frequency if session.engagement_frequency is not None else 50.0,
-            "assessment_accuracy": session.assessment_accuracy if session.assessment_accuracy is not None else 50.0,
-        }
-    finally:
-        db.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,3 +320,139 @@ def _compress_old_memory(db, session_id: str) -> None:
         logger.warning(f"Memory compression failed (non-critical): {e}")
         # Non-critical — the system works fine without summary,
         # it just sends fewer history messages
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session Remarks & Student Memory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def update_session_remark(session_id: str, remark: str) -> None:
+    """
+    Saves the latest batch remark to the session row.
+    The remark is a teacher-style performance note generated after every 4 turns.
+    """
+    if not remark:
+        return
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        if session:
+            session.session_remark = remark
+            db.commit()
+            logger.info(f"Updated session remark for {session_id}.")
+    except Exception as e:
+        logger.warning(f"update_session_remark failed: {e}")
+    finally:
+        db.close()
+
+
+MEMORY_MERGE_SYSTEM_PROMPT = """You manage a persistent memory list for a student's subject profile.
+These are facts learned about the student that should inform future tutoring.
+
+Existing memory entries:
+{existing_memory}
+
+New observation from this session (teacher's remark):
+{remark}
+
+New conversation context:
+{context}
+
+Task: Merge these into an updated memory list. Keep entries that are still relevant.
+Add 1-2 new specific, useful facts about the student if observed.
+Remove or merge duplicates. Keep the total under 8 bullet points.
+Output ONLY a JSON array of strings (the memory entries).
+
+Example:
+["Student prefers step-by-step explanations.", "Struggles with application-level pH problems.", "Shows strong recall ability."]"""
+
+
+def update_student_memory(
+    student_id: str,
+    subject: str,
+    remark: str,
+    recent_turns_text: str,
+) -> None:
+    """
+    Updates the persistent student_memory JSON on the StudentSubjectProfile.
+    Called after each batch update to extract and merge long-term facts.
+    """
+    if not remark:
+        return
+    db = SessionLocal()
+    try:
+        from db.models import StudentSubjectProfile
+        profile = db.query(StudentSubjectProfile).filter(
+            StudentSubjectProfile.student_id == student_id,
+            StudentSubjectProfile.subject == subject,
+        ).first()
+
+        if not profile:
+            return
+
+        existing_memory: list[str] = json.loads(profile.student_memory or "[]")
+        existing_str = "\n".join(f"- {m}" for m in existing_memory) if existing_memory else "(none yet)"
+
+        prompt = MEMORY_MERGE_SYSTEM_PROMPT.format(
+            existing_memory=existing_str,
+            remark=remark,
+            context=recent_turns_text[:600],
+        )
+
+        client = _get_groq()
+        model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            temperature=0.1,
+            max_tokens=300,
+        )
+
+        raw = response.choices[0].message.content.strip()
+        # Parse the JSON array
+        if "[" in raw:
+            raw = raw[raw.find("["):raw.rfind("]")+1]
+        new_memory: list[str] = json.loads(raw)
+
+        profile.student_memory = json.dumps(new_memory[:8])  # cap at 8 entries
+        db.commit()
+        logger.info(f"Updated student memory for {student_id}/{subject}: {len(new_memory)} entries.")
+
+    except Exception as e:
+        logger.warning(f"update_student_memory failed (non-critical): {e}")
+    finally:
+        db.close()
+
+
+def get_session_remark(session_id: str) -> str:
+    """Returns the current session remark text."""
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        return (session.session_remark or "") if session else ""
+    finally:
+        db.close()
+
+
+def get_student_memory(student_id: str, subject: str) -> list[str]:
+    """Returns the persistent memory list for a student in a subject."""
+    db = SessionLocal()
+    try:
+        from db.models import StudentSubjectProfile
+        profile = db.query(StudentSubjectProfile).filter(
+            StudentSubjectProfile.student_id == student_id,
+            StudentSubjectProfile.subject == subject,
+        ).first()
+        if not profile or not profile.student_memory:
+            return []
+        return json.loads(profile.student_memory)
+    except Exception:
+        return []
+    finally:
+        db.close()
+

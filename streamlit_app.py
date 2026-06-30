@@ -274,9 +274,18 @@ def init_backend():
 
 @st.cache_resource(show_spinner=False)
 def get_tutor_chat():
+    # Cache busted to ensure fresh import of tutor.chat
     from tutor.chat import chat
     return chat
 
+
+@st.cache_resource(show_spinner=False)
+def preload_models():
+    """Preload embedding and router models to avoid delay on first query."""
+    from routing.embedder import Embedder
+    # from routing.semantic_router import SemanticRouter
+    Embedder()
+    # SemanticRouter()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session State Bootstrap
@@ -284,6 +293,8 @@ def get_tutor_chat():
 
 def init_state():
     defaults = {
+        "student_id": "",
+        "username": "",
         "session_id": "",
         "messages": [],           # list of {"role", "content", "sources", "chunks", "chapter", "topic"}
         "show_context": True,     # toggle for the right panel
@@ -316,13 +327,8 @@ def render_sidebar():
 
         st.markdown("### ⚙️ Session Settings")
 
-        class_options = [6, 7, 8, 9, 10, 11, 12]
-        st.session_state.class_num = st.selectbox(
-            "Class",
-            options=class_options,
-            index=class_options.index(st.session_state.class_num),
-            key="class_select",
-        )
+        # Class is now tied to the student profile, so we only display it, but keep state for reference
+        st.markdown(f"**Class:** {st.session_state.get('class_num', 10)}")
 
         subject_options = ["Science", "Mathematics", "Social Science", "English", "Hindi"]
         st.session_state.subject = st.selectbox(
@@ -347,15 +353,58 @@ def render_sidebar():
             st.success("New session started!")
             st.rerun()
 
+        # Past Sessions Dropdown
+        if st.session_state.student_id:
+            from db.memory import get_student_sessions, get_full_session_messages
+            past_sessions = get_student_sessions(st.session_state.student_id, st.session_state.subject)
+            if past_sessions:
+                session_options = {s["id"]: f"{s['created_at'].strftime('%Y-%m-%d %H:%M')} ({s['message_count']} msgs)" for s in past_sessions}
+                # Add a dummy default option to represent the current unsaved session if no session is active yet
+                if not st.session_state.session_id:
+                    session_options[""] = "--- Current (Unsaved) ---"
+                
+                selected_session_id = st.selectbox(
+                    "📂 Past Sessions",
+                    options=list(session_options.keys()),
+                    format_func=lambda x: session_options.get(x, x),
+                    index=list(session_options.keys()).index(st.session_state.session_id) if st.session_state.session_id in session_options else 0,
+                    key="past_sessions_dropdown"
+                )
+                
+                if selected_session_id and selected_session_id != st.session_state.session_id:
+                    # User selected a different past session
+                    st.session_state.session_id = selected_session_id
+                    st.session_state.messages = get_full_session_messages(selected_session_id)
+                    st.session_state.turn_count = len(st.session_state.messages) // 2
+                    
+                    # Refresh metrics from DB for the newly loaded session
+                    from db.profile import get_subject_metrics
+                    from db.metrics import compute_cognitive_skills
+                    from db.database import SessionLocal
+                    _db = SessionLocal()
+                    try:
+                        metrics = get_subject_metrics(_db, st.session_state.student_id, st.session_state.subject)
+                        st.session_state.metrics = metrics
+                        st.session_state.cognitive_skills = compute_cognitive_skills(metrics)
+                        
+                        # Also refresh memory_summary for the old session
+                        from db.models import ConversationSession
+                        sess = _db.query(ConversationSession).filter(ConversationSession.id == selected_session_id).first()
+                        st.session_state.memory_summary = sess.summary if sess else ""
+                    finally:
+                        _db.close()
+                    st.rerun()
+
         st.markdown("---")
 
         # Session Stats
         st.markdown("### 📊 Session Stats")
         sid_display = st.session_state.session_id[:8] + "..." if st.session_state.session_id else "—"
         st.markdown(f"""
+        <div class="stat-row"><span>Student</span><span class="stat-value">{st.session_state.username}</span></div>
         <div class="stat-row"><span>Session ID</span><span class="stat-value">{sid_display}</span></div>
         <div class="stat-row"><span>Turns</span><span class="stat-value">{st.session_state.turn_count}</span></div>
-        <div class="stat-row"><span>Class</span><span class="stat-value">{st.session_state.class_num}</span></div>
+        <div class="stat-row"><span>Class</span><span class="stat-value">{st.session_state.get('class_num', 10)}</span></div>
         <div class="stat-row"><span>Subject</span><span class="stat-value">{st.session_state.subject}</span></div>
         """, unsafe_allow_html=True)
 
@@ -366,30 +415,70 @@ def render_sidebar():
             profiles = ["Standard", "Struggling but Persistent", "Fast Learner", "Casual"]
             
             selected_profile = st.selectbox(
-                "Apply Student Profile Preset",
+                "Select Student Profile Preset",
                 options=profiles,
                 index=0,
                 key="profile_select_box"
             )
             
-            if "last_applied_profile" not in st.session_state or st.session_state.last_applied_profile != selected_profile:
+            if st.button("Apply Preset", use_container_width=True):
                 from db.metrics import apply_profile_metrics, compute_cognitive_skills
                 from db.database import SessionLocal
                 db = SessionLocal()
                 try:
-                    updated = apply_profile_metrics(st.session_state.session_id, selected_profile, db)
+                    updated = apply_profile_metrics(
+                        st.session_state.student_id,
+                        st.session_state.subject,
+                        selected_profile,
+                        db
+                    )
                     st.session_state.metrics = updated
                     st.session_state.cognitive_skills = compute_cognitive_skills(updated)
-                    st.session_state.last_applied_profile = selected_profile
                     st.success(f"Preset applied: {selected_profile}")
                     st.rerun()
                 finally:
                     db.close()
 
-        # Memory Summary
+        # Session Remark (teacher-style performance note, updated every 4 turns)
+        if st.session_state.session_id:
+            st.markdown("---")
+            st.markdown("### 📝 Session Remarks")
+            from db.memory import get_session_remark
+            remark = get_session_remark(st.session_state.session_id)
+            if remark:
+                st.markdown(
+                    f'<div class="memory-card" style="border-left: 3px solid #a0aaf0;">{remark}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    "<p style='font-size:11px; color:#707090;'>Remarks will appear after every 4 turns of conversation.</p>",
+                    unsafe_allow_html=True
+                )
+
+        # Student Memory (persistent cross-session facts)
+        if st.session_state.student_id:
+            st.markdown("---")
+            st.markdown("### 🧠 Learning Memory")
+            from db.memory import get_student_memory
+            mem = get_student_memory(st.session_state.student_id, st.session_state.subject)
+            if mem:
+                for entry in mem:
+                    st.markdown(
+                        f'<div style="font-size:11px; color:#c0c0d8; background:rgba(102,126,234,0.07); '
+                        f'border-radius:5px; padding:5px 10px; margin:3px 0;">• {entry}</div>',
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.markdown(
+                    "<p style='font-size:11px; color:#707090;'>Memory entries will be built from your conversations.</p>",
+                    unsafe_allow_html=True
+                )
+
+        # Conversation Summary (compressed older turns memory)
         if st.session_state.memory_summary:
             st.markdown("---")
-            st.markdown("### 🧠 Conversation Memory")
+            st.markdown("### 📚 Conversation Summary")
             st.markdown(
                 f'<div class="memory-card">{st.session_state.memory_summary}</div>',
                 unsafe_allow_html=True
@@ -401,8 +490,13 @@ def render_sidebar():
                 st.markdown("<p style='font-size:11px; color:#8888a8; margin-bottom: 8px;'>Directly customize student tracking scores.</p>", unsafe_allow_html=True)
                 current_metrics = st.session_state.metrics
                 if not current_metrics:
-                    from db.memory import get_session_metrics
-                    current_metrics = get_session_metrics(st.session_state.session_id)
+                    from db.profile import get_subject_metrics
+                    from db.database import SessionLocal
+                    _db = SessionLocal()
+                    try:
+                        current_metrics = get_subject_metrics(_db, st.session_state.student_id, st.session_state.subject)
+                    finally:
+                        _db.close()
                     st.session_state.metrics = current_metrics
 
                 new_metrics = {}
@@ -428,12 +522,16 @@ def render_sidebar():
                         changed = True
 
                 if changed:
-                    from db.memory import update_session_metrics_directly
+                    from db.profile import update_subject_profile
                     from db.metrics import compute_cognitive_skills
-                    update_session_metrics_directly(st.session_state.session_id, new_metrics)
+                    from db.database import SessionLocal
+                    db = SessionLocal()
+                    try:
+                        update_subject_profile(db, st.session_state.student_id, st.session_state.subject, new_metrics, source="manual")
+                    finally:
+                        db.close()
                     st.session_state.metrics = new_metrics
                     st.session_state.cognitive_skills = compute_cognitive_skills(new_metrics)
-                    st.session_state.last_applied_profile = "Custom"
                     st.rerun()
 
         # Student Insights Dashboard
@@ -443,8 +541,13 @@ def render_sidebar():
             
             metrics = st.session_state.metrics
             if not metrics:
-                from db.memory import get_session_metrics
-                metrics = get_session_metrics(st.session_state.session_id)
+                from db.profile import get_subject_metrics
+                from db.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    metrics = get_subject_metrics(db, st.session_state.student_id, st.session_state.subject)
+                finally:
+                    db.close()
                 st.session_state.metrics = metrics
 
             cognitive_skills = st.session_state.cognitive_skills
@@ -925,9 +1028,9 @@ def handle_input(question: str):
     with st.spinner("🤔 Thinking..."):
         try:
             request = ChatRequest(
+                student_id=st.session_state.student_id,
                 session_id=st.session_state.session_id,
                 question=question,
-                class_num=st.session_state.class_num,
                 subject=st.session_state.subject,
             )
             response = chat_fn(request)
@@ -971,12 +1074,75 @@ def handle_input(question: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# App Entry
+# App Entry & Authentication
 # ─────────────────────────────────────────────────────────────────────────────
+
+def render_auth():
+    st.markdown("""
+    <div class="app-header" style="text-align:center;">
+        <h1 class="app-title">Welcome to VishwAlpha</h1>
+        <p class="app-subtitle">Log in or create an account to start learning</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    from db.database import SessionLocal
+    from db.auth import login_student, register_student
+
+    with tab1:
+        st.subheader("Login")
+        log_user = st.text_input("Username", key="login_username")
+        log_pass = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login", use_container_width=True):
+            db = SessionLocal()
+            try:
+                student = login_student(db, log_user, log_pass)
+                if student:
+                    st.session_state.student_id = student.id
+                    st.session_state.username = student.username
+                    st.session_state.class_num = student.class_num
+                    with st.spinner("Loading AI models into cache (this happens only once)..."):
+                        preload_models()
+                    st.success("Login successful!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+            finally:
+                db.close()
+
+    with tab2:
+        st.subheader("Register")
+        reg_user = st.text_input("Username", key="reg_username")
+        reg_email = st.text_input("Email", key="reg_email")
+        reg_pass = st.text_input("Password", type="password", key="reg_password")
+        reg_class = st.selectbox("Class", [6, 7, 8, 9, 10, 11, 12], index=4)
+        if st.button("Register", use_container_width=True):
+            db = SessionLocal()
+            try:
+                if reg_user and reg_email and reg_pass:
+                    student = register_student(db, reg_user, reg_email, reg_pass, reg_class)
+                    st.session_state.student_id = student.id
+                    st.session_state.username = student.username
+                    st.session_state.class_num = student.class_num
+                    with st.spinner("Loading AI models into cache (this happens only once)..."):
+                        preload_models()
+                    st.success("Registration successful! Logging you in...")
+                    st.rerun()
+                else:
+                    st.error("Please fill in all fields.")
+            except ValueError as e:
+                st.error(str(e))
+            finally:
+                db.close()
+
 
 def main():
     init_state()
     init_backend()
+
+    if not st.session_state.student_id:
+        render_auth()
+        return
 
     render_sidebar()
 

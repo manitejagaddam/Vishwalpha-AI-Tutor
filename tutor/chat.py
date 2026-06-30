@@ -5,8 +5,8 @@ Agent-style chat orchestrator.
 
 Two-step agent flow:
   Step 1 — CLASSIFY the question:
-    "conversational" → answer from history only, NO Qdrant call
-    "curriculum"     → retrieve from Qdrant with confidence gate, then generate
+    "conversational" → answer from history only, NO pgvector call
+    "curriculum"     → retrieve from pgvector with confidence gate, then generate
 
   Step 2 — GENERATE (mode-aware):
     conversational   → TutorLLM with history only (no context injected)
@@ -18,13 +18,13 @@ import os
 import logging
 from groq import Groq
 from schemas import ChatRequest, ChatResponse, SourceInfo
-from db.memory import get_or_create_session, get_history, save_turn, get_session_metrics
+from db.memory import get_or_create_session, get_history, save_turn
 from tutor.llm import TutorLLM
 
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-# Minimum Qdrant cosine similarity score to consider a chunk relevant.
+# Minimum pgvector cosine similarity score to consider a chunk relevant.
 # Chunks below this are silently dropped — the LLM will not hallucinate to fill the gap.
 RETRIEVAL_CONFIDENCE_THRESHOLD = 0.60
 
@@ -47,58 +47,63 @@ def _get_groq() -> Groq:
     return _groq_client
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1: Question Classifier
-# ─────────────────────────────────────────────────────────────────────────────
+import re
 
-def _classify_question(question: str, history_preview: str) -> str:
+# ── Conversational Patterns & Keywords (Heuristics) ───────────────────────────
+# List of regex patterns for conversational inputs that should skip pgvector retrieval
+CONVERSATIONAL_PATTERNS = [
+    # Greetings / Farewells / Politeness
+    r"^(hi|hello|hey|greetings|good morning|good afternoon|good evening|bye|goodbye|see ya|see you)[\s.!]*$",
+    r"^(thanks|thank you|thx|tysm|appreciate it)[\s.!]*$",
+    # Acknowledgements / short replies
+    r"^(yes|no|ok|okay|sure|yep|nope|got it|makes sense|i see|alright|fine|cool|indeed)[\s.!]*$",
+    r"^(correct|wrong|true|false|exactly|absolutely)[\s.!]*$",
+    # Meta questions / navigation
+    r"^(what did we discuss|what did we talk about|what was the last thing|recap the last part|what did you say)[\s.!]*$",
+    r"^(can we (do a quiz|start a quiz|do a test|practice|start|stop|continue|pause|resume|reset))[\s.!]*$",
+    r"^(give me a (quiz|test|question|summary|recap))[\s.!]*$",
+    r"^(what is the plan|what should we do next|what's next)[\s.!]*$",
+    # Clarifications & feedback
+    r"^(can you (explain that again|repeat that|say that again|rephrase that|explain in more detail))[\s.!]*$",
+    r"^(i (don't understand|do not understand|get it|don't get it|understand))[\s.!]*$",
+]
+
+# Set of specific single words or short phrases that are definitely conversational
+CONVERSATIONAL_KEYWORDS = {
+    "yes", "no", "ok", "okay", "sure", "yep", "nope", "thanks", "thank you", "hi", "hello",
+    "hey", "correct", "wrong", "got it", "i see", "undestood", "understood", "makes sense",
+    "bye", "goodbye", "help", "next", "continue", "reset", "clear"
+}
+
+def _heuristic_is_conversational(question: str) -> bool:
     """
-    Classifies the student's message into one of two categories:
-      "curriculum"     — a subject/topic question that needs Qdrant retrieval
-      "conversational" — a greeting, acknowledgement, follow-up on what was JUST said,
-                         or meta-question (e.g., "yes", "ok", "what did we discuss?")
-
-    Uses a fast, cheap LLM call with temperature=0 for deterministic output.
-
-    Returns:
-        "curriculum" or "conversational"
+    Algorithmic heuristic to identify conversational messages.
+    Returns True if the message is conversational (skips pgvector RAG),
+    False if it requires pgvector textbook retrieval.
     """
-    prompt = f"""You are a question classifier for an educational chatbot.
-
-Classify the student's message below into EXACTLY ONE of:
-  - "curriculum"     : The student is asking about a specific subject topic, definition, concept,
-                       equation, or any factual/educational content that requires a
-                       textbook lookup. Examples: "What is photosynthesis?",
-                       "Explain rancidity", "How do chemical reactions work?"
-  - "conversational" : The student is chatting, asking a meta question, asking for study advice,
-                       asking "what should I learn today?", asking for topic suggestions,
-                       asking for a quiz, or continuing a conversation without needing
-                       new textbook facts. Examples: "yes", "ok", "got it", "what did we discuss?",
-                       "can you explain that again?", "tell me a topic I should learn today",
-                       "give me a summary", "what's the plan?"
-
-Recent conversation context (for reference):
-{history_preview if history_preview else "(No prior conversation)"}
-
-Student message: "{question}"
-
-Reply with ONLY the word "curriculum" or "conversational". No explanation."""
-
-    try:
-        client = _get_groq()
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
-            temperature=0,
-            max_tokens=5,
-        )
-        result = response.choices[0].message.content.strip().lower()
-        if "curriculum" in result:
-            return "curriculum"
-        return "conversational"
-    except Exception as e:
-        logger.warning(f"Classifier failed, defaulting to curriculum: {e}")
-        return "curriculum"
+    clean_question = question.strip().lower()
+    
+    # 1. Very short messages are almost always conversational (e.g. "ok", "why?", "yes")
+    if len(clean_question) < 15:
+        # If it contains "?" and is at least 8 chars, it could be a very short question like "What is pH?"
+        if "?" in clean_question:
+            # Check if it has textbook keywords to avoid false positives
+            keywords = ["what", "why", "how", "define", "acid", "base", "salt", "metal", "reaction", "ph", "formula", "atom", "molecule"]
+            if any(kw in clean_question for kw in keywords):
+                return False
+        return True
+        
+    # 2. Check exact matches in our common keyword set (removing punctuation)
+    cleaned_words = re.sub(r"[^\w\s]", "", clean_question).strip()
+    if cleaned_words in CONVERSATIONAL_KEYWORDS:
+        return True
+        
+    # 3. Check regular expression patterns
+    for pattern in CONVERSATIONAL_PATTERNS:
+        if re.search(pattern, clean_question):
+            return True
+            
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,9 +112,11 @@ Reply with ONLY the word "curriculum" or "conversational". No explanation."""
 
 def _retrieve_with_confidence(
     question: str,
+    class_num: int = None,
+    subject: str = None
 ) -> tuple[str, list[SourceInfo], list[dict], dict | None]:
     """
-    Retrieves Qdrant chunks and filters out low-confidence results.
+    Retrieves pgvector chunks and filters out low-confidence results.
 
     Returns:
         (context, sources, raw_chunks, route)
@@ -132,8 +139,15 @@ def _retrieve_with_confidence(
         f"{route.get('chapter')} | {route.get('topic')}"
     )
 
-    # Retrieve raw chunks
+    # Retrieve raw chunks (engine should pre-filter by class_num and subject if supported)
     engine = RetrievalEngine()
+    # If the engine supports pre-filtering, we can pass class_num and subject. 
+    # For now, we rely on the router to constrain it, but we add them to the route constraints.
+    if class_num:
+        route["class"] = class_num
+    if subject:
+        route["subject"] = subject
+        
     raw_chunks = engine.retrieve(question, route, top_k=5)
 
     # ── Confidence gate ───────────────────────────────────────────────────────
@@ -190,54 +204,50 @@ def chat(request: ChatRequest) -> ChatResponse:
       2. Run Cognitive Middleware (pre-generation metrics evaluation & adjustment)
       3. Classify question: "curriculum" or "conversational"
       4a. [conversational] → generate from history only
-      4b. [curriculum]     → retrieve from Qdrant (with confidence gate)
+      4b. [curriculum]     → retrieve from pgvector (with confidence gate)
                           → if no confident chunks: return "not in my materials"
                           → else: generate strictly from retrieved context
       5. Persist turn to PostgreSQL
       6. Return ChatResponse
     """
     from db.database import SessionLocal
-    from db.metrics import adjust_student_metrics_pre_generation, compute_cognitive_skills
+    from db.metrics import collect_turn_signals, append_pending_signal, batch_update_cognitive_profile, compute_cognitive_skills, BATCH_TURN_INTERVAL
+    from db.profile import get_subject_metrics
+    from db.auth import get_student
+    from db.memory import update_session_remark, update_student_memory, get_student_memory
 
-    # ── 1. Session + memory ───────────────────────────────────────────────────
-    session_id = get_or_create_session(
-        session_id=request.session_id,
-        class_num=request.class_num,
-        subject=request.subject,
-    )
-    memory_summary, recent_history = get_history(session_id)
-
-    logger.info(
-        f"Session {session_id[:8]}... | "
-        f"Memory: {len(memory_summary)} chars | "
-        f"Recent: {len(recent_history)} messages"
-    )
-
-    # ── 2. Cognitive Middleware (Pre-generation) ──────────────────────────────
     db = SessionLocal()
-    metrics_adjustments = {}
     try:
-        metrics_adjustments = adjust_student_metrics_pre_generation(
-            session_id=session_id,
-            question=request.question,
-            history=recent_history,
-            memory_summary=memory_summary,
-            db=db
+        # Fetch student to get class_num
+        student = get_student(db, request.student_id)
+        class_num = student.class_num if student else 10
+
+        # ── 1. Session + memory ───────────────────────────────────────────────────
+        session_id = get_or_create_session(
+            student_id=request.student_id,
+            session_id=request.session_id,
+            class_num=class_num,
+            subject=request.subject,
         )
+        memory_summary, recent_history = get_history(session_id)
+
+        logger.info(
+            f"Session {session_id[:8]}... | "
+            f"Memory: {len(memory_summary)} chars | "
+            f"Recent: {len(recent_history)} messages"
+        )
+
+        # Load metrics and compute cognitive skills (no LLM pre-gen call)
+        metrics = get_subject_metrics(db, request.student_id, request.subject)
+        cognitive_skills = compute_cognitive_skills(metrics)
+        student_memory = get_student_memory(request.student_id, request.subject)
     finally:
         db.close()
 
-    # Load the updated metrics and compute cognitive skills
-    metrics = get_session_metrics(session_id)
-    cognitive_skills = compute_cognitive_skills(metrics)
-
-    # ── 3. Classify ───────────────────────────────────────────────────────────
-    # Build a brief history preview for the classifier
-    history_preview = "\n".join(
-        f"{m.role.capitalize()}: {m.content}" for m in recent_history[-4:]
-    )
-    question_type = _classify_question(request.question, history_preview)
-    logger.info(f"Question classified as: '{question_type}'")
+    # ── 3. Classify via zero-token heuristic ──────────────────────────────────
+    is_conv = _heuristic_is_conversational(request.question)
+    question_type = "conversational" if is_conv else "curriculum"
+    logger.info(f"Question heuristically classified as: '{question_type}'")
 
     # ── 4. Route by classification ────────────────────────────────────────────
     context = ""
@@ -247,60 +257,41 @@ def chat(request: ChatRequest) -> ChatResponse:
     is_grounded = False
 
     if question_type == "conversational":
-        # Pure conversational — no Qdrant, answer from history
+        # Pure conversational — no pgvector, answer from history
         logger.info("Mode: conversational (no retrieval)")
 
     else:
         # Curriculum question — retrieve with confidence gate
-        logger.info("Mode: curriculum (Qdrant retrieval)")
-        context, sources, raw_chunks, route = _retrieve_with_confidence(request.question)
+        logger.info("Mode: curriculum (pgvector retrieval)")
+        context, sources, raw_chunks, route = _retrieve_with_confidence(
+            request.question, 
+            class_num=class_num, 
+            subject=request.subject
+        )
         is_grounded = bool(context)
 
         if not is_grounded:
-            # No confident chunks found — return a polite refusal immediately
-            # Do NOT call the generative LLM (prevents hallucination)
-            refusal = (
-                "I couldn't find specific information about this in the textbook content "
-                "I have loaded right now. Could you try rephrasing your question, "
-                "or ask about a topic from your NCERT chapters?"
-            )
-            total_messages = save_turn(
-                session_id=session_id,
-                question=request.question,
-                answer=refusal,
-                context_used="",
-                routed_topic=route.get("topic", "") if route else "",
-            )
-            return ChatResponse(
-                session_id=session_id,
-                answer=refusal,
-                sources=[],
-                conversation_length=total_messages,
-                raw_chunks=raw_chunks,
-                routed_chapter=route.get("chapter", "") if route else "",
-                routed_topic=route.get("topic", "") if route else "",
-                metrics=metrics,
-                metrics_adjustments=metrics_adjustments,
-                cognitive_skills=cognitive_skills,
-            )
+            # No confident chunks found — fallback to a normal LLM response
+            logger.info("No confident chunks found, falling back to conversational mode.")
+            question_type = "conversational"
 
     # ── 5. Generate (personalized via metrics & cognitive skills) ─────────────
     tutor = _get_tutor()
     answer, prompt_messages = tutor.generate(
         question=request.question,
-        context=context,                    # "" for conversational, real context for curriculum
+        context=context,
         history=recent_history,
         memory_summary=memory_summary,
-        question_type=question_type,        # controls system prompt strictness
+        question_type=question_type,
         is_grounded=is_grounded,
-        class_num=request.class_num,
+        class_num=class_num,
         subject=request.subject,
         metrics=metrics,
         cognitive_skills=cognitive_skills,
+        student_memory=student_memory,
     )
 
-
-    # ── 6. Persist ────────────────────────────────────────────────────────────
+    # ── 6. Persist turn ───────────────────────────────────────────────────────
     routed_topic = sources[0].topic if sources else (route.get("topic", "") if route else "")
     total_messages = save_turn(
         session_id=session_id,
@@ -309,8 +300,42 @@ def chat(request: ChatRequest) -> ChatResponse:
         context_used=context[:500] if context else "",
         routed_topic=routed_topic,
     )
+    turn_count = total_messages // 2  # 2 messages per turn (student + tutor)
 
-    # ── 7. Return ─────────────────────────────────────────────────────────────
+    # ── 7. Post-turn: algorithmic signal collection + batch trigger ───────────
+    metrics_adjustments = {}
+    signal = collect_turn_signals(
+        question=request.question,
+        answer=answer,
+        history=recent_history,
+        turn_number=turn_count,
+    )
+    db2 = SessionLocal()
+    try:
+        append_pending_signal(db2, request.student_id, request.subject, signal)
+
+        # Every BATCH_TURN_INTERVAL turns → run holistic LLM cognitive update
+        if turn_count > 0 and turn_count % BATCH_TURN_INTERVAL == 0:
+            logger.info(f"Batch trigger at turn {turn_count} — running cognitive batch update.")
+            metrics_adjustments, remark = batch_update_cognitive_profile(
+                student_id=request.student_id,
+                subject=request.subject,
+                db=db2,
+            )
+            # Reload updated metrics and skills
+            metrics = get_subject_metrics(db2, request.student_id, request.subject)
+            cognitive_skills = compute_cognitive_skills(metrics)
+
+            if remark:
+                update_session_remark(session_id, remark)
+                recent_turns_text = "\n".join(
+                    f"{m.role}: {m.content[:200]}" for m in recent_history
+                )
+                update_student_memory(request.student_id, request.subject, remark, recent_turns_text)
+    finally:
+        db2.close()
+
+    # ── 8. Return ─────────────────────────────────────────────────────────────
     return ChatResponse(
         session_id=session_id,
         answer=answer,
@@ -325,3 +350,4 @@ def chat(request: ChatRequest) -> ChatResponse:
         metrics_adjustments=metrics_adjustments,
         cognitive_skills=cognitive_skills,
     )
+

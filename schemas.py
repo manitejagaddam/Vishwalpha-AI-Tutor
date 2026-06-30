@@ -59,14 +59,30 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    class_num: int
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class AuthResponse(BaseModel):
+    student_id: str
+    username: str
+    class_num: int
+    message: str = ""
+
 class ChatRequest(BaseModel):
     """Incoming request from the frontend to the /chat endpoint."""
+    student_id: str = Field(description="The ID of the authenticated student.")
     session_id: str = Field(
         default="",
         description="Conversation session ID. Leave empty for a new session.",
     )
     question: str
-    class_num: int = Field(default=10, description="Student's class level, e.g. 10")
     subject: str = Field(default="Science", description="Subject name")
 
 

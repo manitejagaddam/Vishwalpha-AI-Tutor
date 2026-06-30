@@ -1,4 +1,4 @@
-from IPython.core import display_functions
+# from IPython.core import display_functions
 import os
 import sys
 import pandas as pd
@@ -18,8 +18,8 @@ df = pd.read_csv("../DataSet/Class_10/Science/class10_science.csv")
 
 for idx in range(1):
     ingest_pdf( 
-        pdf_path=str(df.iloc[idx][0]),
-        class_num=int(df.iloc[idx][1]),
-        subject=str(df.iloc[idx][2]),
-        chapter=str(df.iloc[idx][3]),
+        pdf_path=str(df.iloc[idx, 0]),
+        class_num=int(df.iloc[idx, 1]),
+        subject=str(df.iloc[idx, 2]),
+        chapter=str(df.iloc[idx, 3]),
     )
