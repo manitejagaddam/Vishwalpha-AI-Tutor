@@ -7,7 +7,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Weight applied to metrics updates from chat middleware
-CHAT_METRIC_WEIGHT = 0.3
+# Increased to 1.0 because the LLM prompt already enforces incremental ±3 to ±10 deltas
+CHAT_METRIC_WEIGHT = 1.0
 
 # List of tracking metrics
 METRICS_KEYS = [
@@ -68,10 +69,19 @@ def update_subject_profile(db: Session, student_id: str, subject: str, raw_adjus
             new_val = max(min_val, min(max_val, new_val))
             
             setattr(profile, key, new_val)
+            
+            adj_type = "constant"
+            if effective_delta > 0.01:
+                adj_type = "increase"
+            elif effective_delta < -0.01:
+                adj_type = "decrease"
+                
             applied_adjustments[key] = {
                 "old_value": old_val,
                 "delta": effective_delta,
-                "new_value": new_val
+                "new_value": new_val,
+                "adjustment": adj_type,
+                "reason": f"Updated based on recent conversation."
             }
             
     if source == "chat":
