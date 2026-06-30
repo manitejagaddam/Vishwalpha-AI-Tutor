@@ -291,6 +291,9 @@ def init_state():
         "subject": "Science",
         "turn_count": 0,
         "memory_summary": "",
+        "metrics": {},
+        "cognitive_skills": {},
+        "metrics_adjustments": {},
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -330,14 +333,17 @@ def render_sidebar():
             key="subject_select",
         )
 
-        st.markdown("---")
-
         # New Session button
         if st.button("🆕 New Session", use_container_width=True):
             st.session_state.session_id = ""
             st.session_state.messages = []
             st.session_state.turn_count = 0
             st.session_state.memory_summary = ""
+            st.session_state.metrics = {}
+            st.session_state.cognitive_skills = {}
+            st.session_state.metrics_adjustments = {}
+            if "last_applied_profile" in st.session_state:
+                del st.session_state.last_applied_profile
             st.success("New session started!")
             st.rerun()
 
@@ -353,6 +359,33 @@ def render_sidebar():
         <div class="stat-row"><span>Subject</span><span class="stat-value">{st.session_state.subject}</span></div>
         """, unsafe_allow_html=True)
 
+        # Profile Preset Selector
+        if st.session_state.session_id:
+            st.markdown("---")
+            st.markdown("### 👤 Profile Preset")
+            profiles = ["Standard", "Struggling but Persistent", "Fast Learner", "Casual"]
+            
+            selected_profile = st.selectbox(
+                "Apply Student Profile Preset",
+                options=profiles,
+                index=0,
+                key="profile_select_box"
+            )
+            
+            if "last_applied_profile" not in st.session_state or st.session_state.last_applied_profile != selected_profile:
+                from db.metrics import apply_profile_metrics, compute_cognitive_skills
+                from db.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    updated = apply_profile_metrics(st.session_state.session_id, selected_profile, db)
+                    st.session_state.metrics = updated
+                    st.session_state.cognitive_skills = compute_cognitive_skills(updated)
+                    st.session_state.last_applied_profile = selected_profile
+                    st.success(f"Preset applied: {selected_profile}")
+                    st.rerun()
+                finally:
+                    db.close()
+
         # Memory Summary
         if st.session_state.memory_summary:
             st.markdown("---")
@@ -362,9 +395,174 @@ def render_sidebar():
                 unsafe_allow_html=True
             )
 
+        # Manual Score Control Slider Expander
+        if st.session_state.session_id:
+            with st.expander("🛠️ Manual Score Control"):
+                st.markdown("<p style='font-size:11px; color:#8888a8; margin-bottom: 8px;'>Directly customize student tracking scores.</p>", unsafe_allow_html=True)
+                current_metrics = st.session_state.metrics
+                if not current_metrics:
+                    from db.memory import get_session_metrics
+                    current_metrics = get_session_metrics(st.session_state.session_id)
+                    st.session_state.metrics = current_metrics
+
+                new_metrics = {}
+                metrics_def = [
+                    ("Concept Mastery Score", "concept_master_score", 0.0, 100.0, 1.0),
+                    ("Error Repetition Rate", "error_repetition_rate", 0.0, 1.0, 0.05),
+                    ("Attempt Persistence", "attempt_persistence", 0.0, 100.0, 1.0),
+                    ("Struggle Recovery Rate", "struggle_recovery_rate", 0.0, 100.0, 1.0),
+                    ("Practice Intensity", "practice_intensity", 0.0, 100.0, 1.0),
+                    ("Learning Velocity", "learning_velocity", 0.0, 100.0, 1.0),
+                    ("Knowledge Retention", "knowledge_retention", 0.0, 100.0, 1.0),
+                    ("Cognitive Thinking Level", "cognitive_thinking_level", 0.0, 100.0, 1.0),
+                    ("Engagement Frequency", "engagement_frequency", 0.0, 100.0, 1.0),
+                    ("Assessment Accuracy", "assessment_accuracy", 0.0, 100.0, 1.0),
+                ]
+
+                changed = False
+                for label, key, min_v, max_v, step in metrics_def:
+                    cur_val = current_metrics.get(key, 50.0 if min_v == 0.0 else 0.2)
+                    val = st.slider(label, min_value=min_v, max_value=max_v, value=float(cur_val), step=step, key=f"slider_{key}")
+                    new_metrics[key] = val
+                    if val != float(cur_val):
+                        changed = True
+
+                if changed:
+                    from db.memory import update_session_metrics_directly
+                    from db.metrics import compute_cognitive_skills
+                    update_session_metrics_directly(st.session_state.session_id, new_metrics)
+                    st.session_state.metrics = new_metrics
+                    st.session_state.cognitive_skills = compute_cognitive_skills(new_metrics)
+                    st.session_state.last_applied_profile = "Custom"
+                    st.rerun()
+
+        # Student Insights Dashboard
+        if st.session_state.session_id:
+            st.markdown("---")
+            st.markdown("### 🎓 Student Insights")
+            
+            metrics = st.session_state.metrics
+            if not metrics:
+                from db.memory import get_session_metrics
+                metrics = get_session_metrics(st.session_state.session_id)
+                st.session_state.metrics = metrics
+
+            cognitive_skills = st.session_state.cognitive_skills
+            if not cognitive_skills:
+                from db.metrics import compute_cognitive_skills
+                cognitive_skills = compute_cognitive_skills(metrics)
+                st.session_state.cognitive_skills = cognitive_skills
+
+            view_mode = st.radio(
+                "Display Level",
+                options=["Cognitive Skills (High-Level)", "Raw Tracking Scores (Detailed)"],
+                index=0,
+                key="insights_view_mode"
+            )
+
+            if metrics:
+                cog_val = metrics.get("cognitive_thinking_level", 50.0)
+                if cog_val <= 20:
+                    cog_level = "Remember (Recall)"
+                    cog_desc = "Identifying and recalling textbook facts."
+                    cog_badge = "#6c72cb"
+                elif cog_val <= 40:
+                    cog_level = "Understand"
+                    cog_desc = "Explaining concepts and summaries."
+                    cog_badge = "#a78bfa"
+                elif cog_val <= 60:
+                    cog_level = "Apply"
+                    cog_desc = "Using concepts in new situations/problems."
+                    cog_badge = "#3b82f6"
+                elif cog_val <= 80:
+                    cog_level = "Analyze"
+                    cog_desc = "Drawing connections and breaking down topics."
+                    cog_badge = "#ec4899"
+                else:
+                    cog_level = "Evaluate & Create"
+                    cog_desc = "Critiquing theories and proposing original ideas."
+                    cog_badge = "#38ef7d"
+
+                st.markdown(f"""
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 12px; margin-bottom: 15px;">
+                    <div style="font-size: 11px; text-transform: uppercase; color: #8888a8; font-weight: 600; letter-spacing: 0.05em;">Bloom's Taxonomy Level</div>
+                    <div style="font-size: 16px; font-weight: 700; color: {cog_badge}; margin: 4px 0 2px 0;">{cog_level}</div>
+                    <div style="font-size: 11px; color: #707090; line-height: 1.3;">{cog_desc}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                def render_metric_bar(label, val, is_rate=False, description=None):
+                    percentage = val if not is_rate else val * 100
+                    percentage = max(0.0, min(100.0, percentage))
+                    if is_rate:
+                        hue = max(0.0, min(120.0, (1.0 - val) * 120.0))
+                    else:
+                        hue = max(0.0, min(120.0, (val / 100.0) * 120.0))
+                    color = f"hsl({hue}, 80%, 50%)"
+                    
+                    desc_html = f"<div style='font-size:10px; color:#707090; margin-top:2px;'>{description}</div>" if description else ""
+                    
+                    st.markdown(f"""
+                    <div style="margin-bottom: 12px;">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; color: #a0aaf0;">
+                            <span>{label}</span>
+                            <strong>{percentage:.1f}%</strong>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.05); border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px; border: 1px solid rgba(255,255,255,0.08);">
+                            <div style="background: {color}; width: {percentage}%; height: 100%; border-radius: 4px;"></div>
+                        </div>
+                        {desc_html}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                if "High-Level" in view_mode:
+                    render_metric_bar("Concept Understanding", cognitive_skills.get("concept_understanding", 50.0), description="Concept mastery and assessment accuracy")
+                    render_metric_bar("Learning Effort", cognitive_skills.get("learning_effort", 50.0), description="Practice intensity, persistence, and engagement")
+                    render_metric_bar("Learning Adaptability", cognitive_skills.get("learning_adaptability", 50.0), description="Struggle recovery and low error repetition")
+                    render_metric_bar("Knowledge Stability", cognitive_skills.get("knowledge_stability", 50.0), description="Knowledge retention and learning velocity")
+                    render_metric_bar("Cognitive Depth", cognitive_skills.get("cognitive_depth", 50.0), description="Bloom's taxonomy thinking stage")
+                else:
+                    render_metric_bar("Concept Mastery Score", metrics.get("concept_master_score", 50.0))
+                    render_metric_bar("Error Repetition Rate", metrics.get("error_repetition_rate", 0.0), is_rate=True)
+                    render_metric_bar("Attempt Persistence", metrics.get("attempt_persistence", 50.0))
+                    render_metric_bar("Struggle Recovery Rate", metrics.get("struggle_recovery_rate", 50.0))
+                    render_metric_bar("Practice Intensity", metrics.get("practice_intensity", 50.0))
+                    render_metric_bar("Learning Velocity", metrics.get("learning_velocity", 50.0))
+                    render_metric_bar("Knowledge Retention", metrics.get("knowledge_retention", 50.0))
+                    render_metric_bar("Engagement Frequency", metrics.get("engagement_frequency", 50.0))
+                    render_metric_bar("Assessment Accuracy", metrics.get("assessment_accuracy", 50.0))
+
+        # Cognitive Layer Feed
+        if st.session_state.session_id and st.session_state.metrics_adjustments:
+            st.markdown("---")
+            st.markdown("### 🧠 Cognitive Layer Feed")
+            
+            adjusts = st.session_state.metrics_adjustments
+            has_changes = False
+            for k, val in adjusts.items():
+                adj_type = val.get("adjustment", "constant")
+                if adj_type in ("increase", "decrease"):
+                    has_changes = True
+                    delta_sign = "+" if adj_type == "increase" else "-"
+                    color = "#38ef7d" if adj_type == "increase" else "#ff4b4b"
+                    label = k.replace("_", " ").title()
+                    
+                    st.markdown(f"""
+                    <div style="background: rgba(255,255,255,0.03); border-left: 3px solid {color}; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px;">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px;">
+                            <strong style="color: #c0c0e0;">{label}</strong>
+                            <span style="color: {color}; font-weight: bold;">{delta_sign}{abs(val.get('delta', 0.0)):.1f}</span>
+                        </div>
+                        <div style="font-size: 11px; color: #8888a8; line-height: 1.3; margin-top: 4px;">{val.get('reason', '')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            if not has_changes:
+                st.markdown("<p style='font-size:11px; color:#707090;'>Metrics kept constant for the latest input.</p>", unsafe_allow_html=True)
+
         st.markdown("---")
         st.markdown(
-            "<div style='text-align:center; color:#404060; font-size:11px;'>Powered by Groq · Qdrant · PostgreSQL</div>",
+            "<div style='text-align:center; color:#404060; font-size:11px;'>Powered by Groq · PostgreSQL (pgvector)</div>",
             unsafe_allow_html=True
         )
 
@@ -425,7 +623,7 @@ def render_message(msg: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_context_panel():
-    """Two-tab right panel: Retrieved Chunks + Prompt Inspector."""
+    """Three-tab right panel: Retrieved Chunks + Prompt Inspector + Cognitive Evaluation."""
 
     # Find the last tutor message
     last_tutor = None
@@ -434,7 +632,11 @@ def render_context_panel():
             last_tutor = msg
             break
 
-    tab_chunks, tab_prompt = st.tabs(["📖 Retrieved Context", "🔬 Prompt Inspector"])
+    tab_chunks, tab_prompt, tab_cognitive = st.tabs([
+        "📖 Retrieved Context", 
+        "🔬 Prompt Inspector",
+        "🧠 Cognitive Evaluation"
+    ])
 
     # ── Tab 1: Retrieved Chunks ───────────────────────────────────────────────
     with tab_chunks:
@@ -454,9 +656,9 @@ def render_context_panel():
             if chapter or topic:
                 st.markdown(f"""
                 <div style='font-size:12px; color:#8888b8; margin-bottom:10px;'>
-                    <b style='color:#667eea;'>Routed to:</b>
-                    {f"<span style='color:#c0c0e0;'>{chapter}</span>" if chapter else ""}
-                    {f" › <span style='color:#a0aaf0;'>{topic}</span>" if topic else ""}
+                     <b style='color:#667eea;'>Routed to:</b>
+                     {f"<span style='color:#c0c0e0;'>{chapter}</span>" if chapter else ""}
+                     {f" › <span style='color:#a0aaf0;'>{topic}</span>" if topic else ""}
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -574,6 +776,121 @@ def render_context_panel():
                         with st.expander(f"Show full message [{i+1}] ({len(content)} chars)"):
                             st.code(content, language=None)
 
+    # ── Tab 3: Cognitive Evaluation ───────────────────────────────────────────
+    with tab_cognitive:
+        if not last_tutor:
+            st.markdown("""
+            <div style='color:#505070; font-size:13px; text-align:center; padding:40px 0;'>
+                Ask a question to see the cognitive layer evaluation here.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # Fallback to st.session_state values since they can be updated via sliders/presets in real-time
+            metrics = st.session_state.metrics or last_tutor.get("metrics", {})
+            cognitive_skills = st.session_state.cognitive_skills or last_tutor.get("cognitive_skills", {})
+            adjusts = last_tutor.get("metrics_adjustments", {})
+
+            # 1. High-level Cognitive Skills Dashboard
+            st.markdown("### 🏆 Mapped Cognitive Skills")
+            st.markdown("<p style='font-size:11px; color:#8888a8; margin-top:-10px; margin-bottom: 12px;'>Derived from the 10 raw scores to track student segments.</p>", unsafe_allow_html=True)
+            
+            def render_panel_metric_bar(label, val, is_rate=False, description=None):
+                percentage = val if not is_rate else val * 100
+                percentage = max(0.0, min(100.0, percentage))
+                if is_rate:
+                    hue = max(0.0, min(120.0, (1.0 - val) * 120.0))
+                else:
+                    hue = max(0.0, min(120.0, (val / 100.0) * 120.0))
+                color = f"hsl({hue}, 80%, 50%)"
+                
+                desc_html = f"<div style='font-size:10px; color:#707090; margin-top:2px;'>{description}</div>" if description else ""
+                
+                st.markdown(f"""
+                <div style="margin-bottom: 12px; background: rgba(255,255,255,0.02); padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+                    <div style="display: flex; justify-content: space-between; font-size: 12px; color: #a0aaf0;">
+                        <strong>{label}</strong>
+                        <strong style="color: {color};">{percentage:.1f}%</strong>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.05); border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px; border: 1px solid rgba(255,255,255,0.08);">
+                        <div style="background: {color}; width: {percentage}%; height: 100%; border-radius: 4px;"></div>
+                    </div>
+                    {desc_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+            render_panel_metric_bar("Concept Understanding", cognitive_skills.get("concept_understanding", 50.0), description="Concept mastery and assessment accuracy")
+            render_panel_metric_bar("Learning Effort", cognitive_skills.get("learning_effort", 50.0), description="Practice intensity, persistence, and engagement")
+            render_panel_metric_bar("Learning Adaptability", cognitive_skills.get("learning_adaptability", 50.0), description="Struggle recovery and low error repetition")
+            render_panel_metric_bar("Knowledge Stability", cognitive_skills.get("knowledge_stability", 50.0), description="Knowledge retention and learning velocity")
+            render_panel_metric_bar("Cognitive Depth", cognitive_skills.get("cognitive_depth", 50.0), description="Bloom's taxonomy thinking stage")
+
+            # 2. Detailed Adjustments and Raw Scores
+            st.markdown("### 📊 Raw Tracking Scores")
+            with st.expander("Show Detailed 10 Scores & Adjustments", expanded=False):
+                # Bloom's level
+                cog_val = metrics.get("cognitive_thinking_level", 50.0)
+                if cog_val <= 20:
+                    cog_level = "Remember (Recall)"
+                    cog_badge = "#6c72cb"
+                elif cog_val <= 40:
+                    cog_level = "Understand"
+                    cog_desc = "Explaining concepts and summaries."
+                    cog_badge = "#a78bfa"
+                elif cog_val <= 60:
+                    cog_level = "Apply"
+                    cog_desc = "Using concepts in new situations/problems."
+                    cog_badge = "#3b82f6"
+                elif cog_val <= 80:
+                    cog_level = "Analyze"
+                    cog_desc = "Drawing connections and breaking down topics."
+                    cog_badge = "#ec4899"
+                else:
+                    cog_level = "Evaluate & Create"
+                    cog_desc = "Critiquing theories and proposing original ideas."
+                    cog_badge = "#38ef7d"
+
+                st.markdown(f"""
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 12px; margin-bottom: 15px; text-align: center;">
+                    <div style="font-size: 11px; text-transform: uppercase; color: #8888a8; font-weight: 600; letter-spacing: 0.05em;">Bloom's Taxonomy Level</div>
+                    <div style="font-size: 16px; font-weight: 700; color: {cog_badge}; margin: 4px 0 2px 0;">{cog_level} ({cog_val:.1f}%)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                for k, v in metrics.items():
+                    label = k.replace("_", " ").title()
+                    is_rate = (k == "error_repetition_rate")
+                    percentage = v if not is_rate else v * 100.0
+                    
+                    # Check if there was an adjustment on this turn
+                    adj_info = adjusts.get(k, {})
+                    adj_type = adj_info.get("adjustment", "constant")
+                    delta = adj_info.get("delta", 0.0)
+                    
+                    adj_badge = ""
+                    if adj_type == "increase":
+                        adj_badge = f"<span style='color:#38ef7d; font-size:10px; margin-left: 8px;'>▲ +{delta:.1f}</span>"
+                    elif adj_type == "decrease":
+                        adj_badge = f"<span style='color:#ff4b4b; font-size:10px; margin-left: 8px;'>▼ -{abs(delta):.1f}</span>"
+                    
+                    if is_rate:
+                        hue = max(0.0, min(120.0, (1.0 - v) * 120.0))
+                    else:
+                        hue = max(0.0, min(120.0, (v / 100.0) * 120.0))
+                    color = f"hsl({hue}, 80%, 50%)"
+
+                    st.markdown(f"""
+                    <div style="margin-bottom: 10px; background: rgba(0,0,0,0.15); padding: 8px 10px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.04);">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: #a0aaf0;">
+                            <span>{label} {adj_badge}</span>
+                            <strong>{percentage:.1f}%</strong>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.05); border-radius: 4px; height: 5px; width: 100%; overflow: hidden; margin-top: 4px;">
+                            <div style="background: {color}; width: {percentage}%; height: 100%; border-radius: 4px;"></div>
+                        </div>
+                        {f"<div style='font-size:10px; color:#8888a8; margin-top:6px; font-style:italic; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 4px;'>{adj_info.get('reason')}</div>" if adj_info.get('reason') else ""}
+                    </div>
+                    """, unsafe_allow_html=True)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -618,6 +935,9 @@ def handle_input(question: str):
             # Update session state
             st.session_state.session_id = response.session_id
             st.session_state.turn_count = response.conversation_length // 2
+            st.session_state.metrics = response.metrics
+            st.session_state.cognitive_skills = getattr(response, "cognitive_skills", {})
+            st.session_state.metrics_adjustments = getattr(response, "metrics_adjustments", {})
 
             # Store tutor response with all metadata for rendering
             st.session_state.messages.append({
@@ -629,6 +949,9 @@ def handle_input(question: str):
                 "topic": response.routed_topic,
                 "question_type": response.question_type,
                 "prompt_messages": response.prompt_messages,
+                "metrics": response.metrics,
+                "metrics_adjustments": response.metrics_adjustments,
+                "cognitive_skills": response.cognitive_skills,
             })
 
             # Update memory summary in sidebar

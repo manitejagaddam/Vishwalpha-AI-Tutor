@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Float
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 
 Base = declarative_base()
 
@@ -79,6 +80,19 @@ class ConversationSession(Base):
     class_num = Column(Integer, nullable=True)
     subject = Column(String(100), nullable=True)
     summary = Column(Text, nullable=True)                   # compressed memory of older turns
+    
+    # Student Learning Metrics
+    concept_master_score = Column(Float, default=50.0, nullable=True)
+    error_repetition_rate = Column(Float, default=0.0, nullable=True)
+    attempt_persistence = Column(Float, default=50.0, nullable=True)
+    struggle_recovery_rate = Column(Float, default=50.0, nullable=True)
+    practice_intensity = Column(Float, default=50.0, nullable=True)
+    learning_velocity = Column(Float, default=50.0, nullable=True)
+    knowledge_retention = Column(Float, default=50.0, nullable=True)
+    cognitive_thinking_level = Column(Float, default=50.0, nullable=True)
+    engagement_frequency = Column(Float, default=50.0, nullable=True)
+    assessment_accuracy = Column(Float, default=50.0, nullable=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -105,3 +119,32 @@ class ConversationMessage(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     session = relationship("ConversationSession", back_populates="messages")
+
+
+class CurriculumRouting(Base):
+    """
+    PostgreSQL-based vector table for semantic routing.
+    Equivalent to the Qdrant 'curriculum_routing' collection.
+    """
+    __tablename__ = "curriculum_routing"
+    id = Column(String(100), primary_key=True)
+    class_num = Column(Integer, nullable=True)
+    subject = Column(String(100), nullable=True)
+    chapter = Column(String(200), nullable=True)
+    topic = Column(String(200), nullable=True)
+    vector = Column(Vector(384), nullable=False)
+
+
+class CurriculumContent(Base):
+    """
+    PostgreSQL-based vector table for curriculum RAG retrieval chunks.
+    Equivalent to the Qdrant 'curriculum_content' collection.
+    """
+    __tablename__ = "curriculum_content"
+    id = Column(String(100), primary_key=True)
+    class_num = Column(Integer, nullable=True)
+    subject = Column(String(100), nullable=True)
+    chapter = Column(String(200), nullable=True)
+    topic = Column(String(200), nullable=True)
+    content = Column(Text, nullable=False)
+    vector = Column(Vector(384), nullable=False)

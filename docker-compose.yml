@@ -15,12 +15,9 @@ services:
     # or you can override this in your .env file
     environment:
       - DATABASE_URL=postgresql://vishwalpha:password@db:5432/vishwalpha_tutor
-      - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       db:
-        condition: service_started
-      qdrant:
         condition: service_started
       redis:
         condition: service_started
@@ -44,9 +41,9 @@ services:
       - api
     restart: unless-stopped
 
-  # PostgreSQL Database for chat history and curriculum metadata
+  # PostgreSQL Database for chat history, curriculum metadata, and pgvector embeddings
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: vishwalpha-postgres
     environment:
       POSTGRES_USER: vishwalpha
@@ -56,17 +53,6 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  # Qdrant Vector Database for RAG context
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: vishwalpha-qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
   # Redis for Semantic Router caching
@@ -81,5 +67,4 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:
   redis_data:

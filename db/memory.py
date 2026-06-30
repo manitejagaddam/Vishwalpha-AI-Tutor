@@ -19,6 +19,7 @@ from groq import Groq
 from db.database import SessionLocal
 from db.models import ConversationSession, ConversationMessage
 from schemas import ChatMessage
+from db.metrics import update_student_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,32 @@ def save_turn(
         db.close()
 
 
+def update_session_metrics_directly(session_id: str, metrics_dict: dict) -> None:
+    """
+    Directly updates the session metrics (for manual adjustments or presets).
+    """
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(ConversationSession.id == session_id).first()
+        if session:
+            for key, val in metrics_dict.items():
+                if hasattr(session, key):
+                    # Clip values appropriately
+                    limit_min = 0.0
+                    limit_max = 1.0 if key == "error_repetition_rate" else 100.0
+                    try:
+                        f_val = float(val)
+                        clipped = max(limit_min, min(limit_max, f_val))
+                        setattr(session, key, clipped)
+                    except (ValueError, TypeError):
+                        pass
+            db.commit()
+            logger.info(f"Directly updated metrics for session {session_id}.")
+    finally:
+        db.close()
+
+
+
 def get_session_message_count(session_id: str) -> int:
     """Returns the total number of messages in a session."""
     db = SessionLocal()
@@ -162,6 +189,31 @@ def get_session_message_count(session_id: str) -> int:
         return db.query(ConversationMessage).filter(
             ConversationMessage.session_id == session_id
         ).count()
+    finally:
+        db.close()
+
+
+def get_session_metrics(session_id: str) -> dict:
+    """Returns the current student learning metrics for a session."""
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        if not session:
+            return {}
+        return {
+            "concept_master_score": session.concept_master_score if session.concept_master_score is not None else 50.0,
+            "error_repetition_rate": session.error_repetition_rate if session.error_repetition_rate is not None else 0.0,
+            "attempt_persistence": session.attempt_persistence if session.attempt_persistence is not None else 50.0,
+            "struggle_recovery_rate": session.struggle_recovery_rate if session.struggle_recovery_rate is not None else 50.0,
+            "practice_intensity": session.practice_intensity if session.practice_intensity is not None else 50.0,
+            "learning_velocity": session.learning_velocity if session.learning_velocity is not None else 50.0,
+            "knowledge_retention": session.knowledge_retention if session.knowledge_retention is not None else 50.0,
+            "cognitive_thinking_level": session.cognitive_thinking_level if session.cognitive_thinking_level is not None else 50.0,
+            "engagement_frequency": session.engagement_frequency if session.engagement_frequency is not None else 50.0,
+            "assessment_accuracy": session.assessment_accuracy if session.assessment_accuracy is not None else 50.0,
+        }
     finally:
         db.close()
 
