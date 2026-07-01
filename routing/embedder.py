@@ -1,8 +1,13 @@
 import os
+import warnings
 from dotenv import load_dotenv
 
+# Suppress noisy transformers warnings
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+warnings.filterwarnings("ignore", message=".*Accessing `__path__`.*")
+
 # Load environment variables early so Hugging Face client sees the HF_TOKEN
-load_dotenv()
+load_dotenv(override=True)
 
 from sentence_transformers import SentenceTransformer
 

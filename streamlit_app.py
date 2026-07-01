@@ -15,7 +15,7 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Page config MUST be first Streamlit call ──────────────────────────────────
 st.set_page_config(
@@ -1101,8 +1101,11 @@ def render_auth():
                     st.session_state.student_id = student.id
                     st.session_state.username = student.username
                     st.session_state.class_num = student.class_num
-                    with st.spinner("Loading AI models into cache (this happens only once)..."):
-                        preload_models()
+                    import threading
+                    from streamlit.runtime.scriptrunner import add_script_run_ctx
+                    t = threading.Thread(target=preload_models, daemon=True)
+                    add_script_run_ctx(t)
+                    t.start()
                     st.success("Login successful!")
                     st.rerun()
                 else:
@@ -1124,8 +1127,11 @@ def render_auth():
                     st.session_state.student_id = student.id
                     st.session_state.username = student.username
                     st.session_state.class_num = student.class_num
-                    with st.spinner("Loading AI models into cache (this happens only once)..."):
-                        preload_models()
+                    import threading
+                    from streamlit.runtime.scriptrunner import add_script_run_ctx
+                    t = threading.Thread(target=preload_models, daemon=True)
+                    add_script_run_ctx(t)
+                    t.start()
                     st.success("Registration successful! Logging you in...")
                     st.rerun()
                 else:

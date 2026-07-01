@@ -270,13 +270,23 @@ def _compress_old_memory(db, session_id: str) -> None:
     # Messages to summarise (everything except the last 4)
     old_messages = messages[:-4]
 
+    existing_summary = session.summary or ""
+
+    if existing_summary:
+        # We only need to incorporate the messages that just fell out of the recent window.
+        # Cap it to the last 4 old messages to avoid token blowups if compression was skipped.
+        old_messages = old_messages[-4:]
+
     # Build the conversation text to summarise
     convo_text = "\n".join(
         f"{m.role.capitalize()}: {m.content}" for m in old_messages
     )
 
+    # Force truncate raw text just in case (e.g. max 4000 characters)
+    if len(convo_text) > 4000:
+        convo_text = convo_text[-4000:]
+
     # Include previous summary if it exists (rolling summarisation)
-    existing_summary = session.summary or ""
     if existing_summary:
         convo_text = (
             f"Previous session summary:\n{existing_summary}\n\n"

@@ -5,15 +5,21 @@ import json
 class QueryCache:
     def __init__(self):
         redis_url = os.environ.get("REDIS_URL")
-        if redis_url:
-            try:
-                self.redis_client = redis.Redis.from_url(redis_url, socket_timeout=2.0)
-                self.redis_client.ping()
-            except Exception as e:
-                print(f"WARNING: Could not connect to Redis ({e}). Caching disabled.")
-                self.redis_client = None
-        else:
-            print("WARNING: Redis URL not found. Caching disabled.")
+        try:
+            if redis_url:
+                self.redis_client = redis.Redis.from_url(redis_url, socket_timeout=2.0, decode_responses=True)
+            else:
+                self.redis_client = redis.Redis(
+                    host='main-social-zany-35066.db.redis.io',
+                    port=15761,
+                    decode_responses=True,
+                    username="default",
+                    password="FcXa3bLULKaixeEItPMlWAWN22il4m9v",
+                    socket_timeout=2.0
+                )
+            self.redis_client.ping()
+        except Exception as e:
+            print(f"WARNING: Could not connect to Redis ({e}). Caching disabled.")
             self.redis_client = None
 
     def get(self, query: str) -> list[dict] | None:
