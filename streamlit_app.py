@@ -476,28 +476,35 @@ def render_sidebar():
                 )
 
         # Conversation Summary (compressed older turns memory)
-        if st.session_state.memory_summary:
-            st.markdown("---")
-            st.markdown("### 📚 Conversation Summary")
-            st.markdown(
-                f'<div class="memory-card">{st.session_state.memory_summary}</div>',
-                unsafe_allow_html=True
-            )
+        if st.session_state.session_id:
+            from db.models import ConversationSession
+            from db.database import SessionLocal
+            _db = SessionLocal()
+            try:
+                sess = _db.query(ConversationSession).filter(ConversationSession.id == st.session_state.session_id).first()
+                live_summary = sess.summary if sess else ""
+            finally:
+                _db.close()
+            
+            if live_summary:
+                st.markdown("---")
+                st.markdown("### 📚 Conversation Summary")
+                st.markdown(
+                    f'<div class="memory-card">{live_summary}</div>',
+                    unsafe_allow_html=True
+                )
 
         # Manual Score Control Slider Expander
         if st.session_state.session_id:
             with st.expander("🛠️ Manual Score Control"):
                 st.markdown("<p style='font-size:11px; color:#8888a8; margin-bottom: 8px;'>Directly customize student tracking scores.</p>", unsafe_allow_html=True)
-                current_metrics = st.session_state.metrics
-                if not current_metrics:
-                    from db.profile import get_subject_metrics
-                    from db.database import SessionLocal
-                    _db = SessionLocal()
-                    try:
-                        current_metrics = get_subject_metrics(_db, st.session_state.student_id, st.session_state.subject)
-                    finally:
-                        _db.close()
-                    st.session_state.metrics = current_metrics
+                from db.profile import get_subject_metrics
+                from db.database import SessionLocal
+                _db = SessionLocal()
+                try:
+                    current_metrics = get_subject_metrics(_db, st.session_state.student_id, st.session_state.subject)
+                finally:
+                    _db.close()
 
                 new_metrics = {}
                 metrics_def = [
@@ -539,22 +546,16 @@ def render_sidebar():
             st.markdown("---")
             st.markdown("### 🎓 Student Insights")
             
-            metrics = st.session_state.metrics
-            if not metrics:
-                from db.profile import get_subject_metrics
-                from db.database import SessionLocal
-                db = SessionLocal()
-                try:
-                    metrics = get_subject_metrics(db, st.session_state.student_id, st.session_state.subject)
-                finally:
-                    db.close()
-                st.session_state.metrics = metrics
-
-            cognitive_skills = st.session_state.cognitive_skills
-            if not cognitive_skills:
-                from db.metrics import compute_cognitive_skills
-                cognitive_skills = compute_cognitive_skills(metrics)
-                st.session_state.cognitive_skills = cognitive_skills
+            from db.profile import get_subject_metrics
+            from db.metrics import compute_cognitive_skills
+            from db.database import SessionLocal
+            db = SessionLocal()
+            try:
+                metrics = get_subject_metrics(db, st.session_state.student_id, st.session_state.subject)
+            finally:
+                db.close()
+                
+            cognitive_skills = compute_cognitive_skills(metrics)
 
             view_mode = st.radio(
                 "Display Level",
