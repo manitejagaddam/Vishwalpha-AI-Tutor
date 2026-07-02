@@ -1,10 +1,7 @@
 """
 retrieval/query.py
 ──────────────────
-Handles the student query flow:
-  1. Semantic Router  — maps the question to the most relevant curriculum topic
-  2. Retrieval Engine — fetches top-k content chunks from Qdrant
-  3. Reranker         — compresses retrieved chunks into a clean context string
+Orchestrates the entire query and retrieval flow.
 """
 
 import logging
@@ -14,6 +11,30 @@ from retrieval.reranker import Reranker
 
 logger = logging.getLogger(__name__)
 
+_router: SemanticRouter | None = None
+_engine: RetrievalEngine | None = None
+_reranker: Reranker | None = None
+
+def _get_router() -> SemanticRouter:
+    """Lazy initialization of the SemanticRouter."""
+    global _router
+    if _router is None:
+        _router = SemanticRouter()
+    return _router
+
+def _get_engine() -> RetrievalEngine:
+    """Lazy initialization of the RetrievalEngine."""
+    global _engine
+    if _engine is None:
+        _engine = RetrievalEngine()
+    return _engine
+
+def _get_reranker() -> Reranker:
+    """Lazy initialization of the Reranker."""
+    global _reranker
+    if _reranker is None:
+        _reranker = Reranker()
+    return _reranker
 
 def query_system(question: str) -> str | None:
     """
@@ -31,8 +52,7 @@ def query_system(question: str) -> str | None:
     logger.info(f"QUERY: {question}")
     logger.info("=" * 60)
 
-    # ── Step 1: Semantic Routing ──────────────────────────────────────────────
-    router = SemanticRouter()
+    router = _get_router()
     route = router.route_query(question)
 
     if not route:
@@ -44,13 +64,11 @@ def query_system(question: str) -> str | None:
         f"{route['chapter']} | Topic: {route['topic']}"
     )
 
-    # ── Step 2: Retrieval ─────────────────────────────────────────────────────
-    retrieval_engine = RetrievalEngine()
+    retrieval_engine = _get_engine()
     chunks = retrieval_engine.retrieve(question, route, top_k=5)
     logger.info(f"Retrieved {len(chunks)} chunks from Qdrant")
 
-    # ── Step 3: Reranking + Context Compression ───────────────────────────────
-    reranker = Reranker()
+    reranker = _get_reranker()
     context = reranker.compress_context(chunks)
 
     logger.info("Context compressed and ready.")

@@ -1,3 +1,8 @@
+"""
+db/profile.py
+─────────────
+Functions for managing and updating student cognitive profiles.
+"""
 import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
@@ -6,17 +11,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Weight applied to metrics updates from chat middleware
-# Increased to 1.0 because the LLM prompt already enforces incremental ±3 to ±10 deltas
 CHAT_METRIC_WEIGHT = 1.0
+BATCH_METRIC_WEIGHT = 1.0
 
-# List of tracking metrics
 METRICS_KEYS = [
     "concept_master_score", "error_repetition_rate", "attempt_persistence",
     "struggle_recovery_rate", "practice_intensity", "learning_velocity",
     "knowledge_retention", "cognitive_thinking_level", "engagement_frequency",
     "assessment_accuracy"
 ]
+
+def _clamp(value: float, min_val: float, max_val: float) -> float:
+    """Clamps a value between a minimum and maximum bound."""
+    return max(min_val, min(max_val, value))
 
 def get_or_create_subject_profile(db: Session, student_id: str, subject: str) -> StudentSubjectProfile:
     """Fetches a subject profile, creating it if it doesn't exist."""
@@ -32,28 +39,24 @@ def get_or_create_subject_profile(db: Session, student_id: str, subject: str) ->
             subject=subject
         )
         db.add(profile)
-        db.commit()
-        db.refresh(profile)
-        
-        # After creating a new subject, recompute overall profile
-        recompute_overall_profile(db, student_id)
+        db.flush()
         
     return profile
 
 def update_subject_profile(db: Session, student_id: str, subject: str, raw_adjustments: dict, source: str = "chat") -> dict:
     """
-    Applies adjustments to a subject profile, using a dampening weight.
-    Recomputes the overall profile afterwards.
+    Applies adjustments to a subject profile.
+    source can be "chat", "batch", "assignment", or "manual".
+    Does NOT call db.commit() — the caller owns the transaction.
     """
     profile = get_or_create_subject_profile(db, student_id, subject)
-    weight = CHAT_METRIC_WEIGHT if source == "chat" else 1.0
+    weight = CHAT_METRIC_WEIGHT if source in ("chat", "batch") else 1.0
     
     applied_adjustments = {}
     
     for key in METRICS_KEYS:
         if key in raw_adjustments:
             adj_data = raw_adjustments[key]
-            # adj_data might be a dict with 'delta' or just a scalar value depending on how it's called
             if isinstance(adj_data, dict):
                 raw_delta = float(adj_data.get("delta", 0.0))
             else:
@@ -63,10 +66,9 @@ def update_subject_profile(db: Session, student_id: str, subject: str, raw_adjus
             old_val = getattr(profile, key)
             new_val = old_val + effective_delta
             
-            # Clip bounds
             min_val = 0.0
             max_val = 1.0 if key == "error_repetition_rate" else 100.0
-            new_val = max(min_val, min(max_val, new_val))
+            new_val = _clamp(new_val, min_val, max_val)
             
             setattr(profile, key, new_val)
             
@@ -81,24 +83,25 @@ def update_subject_profile(db: Session, student_id: str, subject: str, raw_adjus
                 "delta": effective_delta,
                 "new_value": new_val,
                 "adjustment": adj_type,
-                "reason": f"Updated based on recent conversation."
+                "reason": "Updated based on recent conversation."
             }
+
+            logger.info(f"  Metric {key}: {old_val:.2f} → {new_val:.2f} (Δ {effective_delta:+.2f})")
             
     if source == "chat":
         profile.chat_turns_count += 1
     elif source == "assignment":
         profile.assignment_count += 1
-        
-    db.commit()
-    db.refresh(profile)
-    
-    # Update overall profile
+
     recompute_overall_profile(db, student_id)
     
     return applied_adjustments
 
 def recompute_overall_profile(db: Session, student_id: str):
-    """Averages all subject profiles and updates the overall profile."""
+    """
+    Averages all subject profiles and updates the overall profile.
+    Does NOT call db.commit() — the caller owns the transaction.
+    """
     profiles = db.query(StudentSubjectProfile).filter(StudentSubjectProfile.student_id == student_id).all()
     overall = db.query(OverallCognitiveProfile).filter(OverallCognitiveProfile.student_id == student_id).first()
     
@@ -109,8 +112,6 @@ def recompute_overall_profile(db: Session, student_id: str):
     for key in METRICS_KEYS:
         avg_val = sum(getattr(p, key) for p in profiles) / num_profiles
         setattr(overall, key, avg_val)
-        
-    db.commit()
 
 def get_subject_metrics(db: Session, student_id: str, subject: str) -> dict:
     """Returns the 10 raw metrics as a dictionary for a given subject."""
@@ -121,6 +122,5 @@ def get_overall_metrics(db: Session, student_id: str) -> dict:
     """Returns the 10 raw metrics as a dictionary for the overall profile."""
     overall = db.query(OverallCognitiveProfile).filter(OverallCognitiveProfile.student_id == student_id).first()
     if not overall:
-        # Fallback default values
         return {k: (0.0 if k == "error_repetition_rate" else 50.0) for k in METRICS_KEYS}
     return {k: getattr(overall, k) for k in METRICS_KEYS}

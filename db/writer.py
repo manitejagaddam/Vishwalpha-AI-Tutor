@@ -7,9 +7,8 @@ Responsibility: Given a list of ProcessedSections for a chapter, persist the
 full hierarchy (Board → Class → Subject → Chapter → Topic → ContentChunk)
 in an idempotent way (safe to re-run without duplicating rows).
 """
-
 import logging
-from db.database import SessionLocal
+from core.db_session import managed_session
 from db.models import (
     Board,
     SchoolClass,
@@ -21,7 +20,6 @@ from db.models import (
 from schemas import ProcessedSection
 
 logger = logging.getLogger(__name__)
-
 
 def save_to_postgres(
     class_num: int,
@@ -44,100 +42,90 @@ def save_to_postgres(
         chapter_title : e.g. "Chemical Reactions and Equations"
         sections      : list of ProcessedSection objects produced by the pipeline
     """
-    db = SessionLocal()
     try:
-        # ── Board ──────────────────────────────────────────────────────────────
-        board = db.query(Board).filter(Board.name == "NCERT").first()
-        if not board:
-            board = Board(
-                name="NCERT",
-                description="National Council of Educational Research and Training",
-            )
-            db.add(board)
-            db.commit()
-
-        # ── SchoolClass ────────────────────────────────────────────────────────
-        school_class = db.query(SchoolClass).filter(
-            SchoolClass.board_id == board.id,
-            SchoolClass.level == class_num,
-        ).first()
-        if not school_class:
-            school_class = SchoolClass(
-                board_id=board.id,
-                name=f"Class {class_num}",
-                level=class_num,
-            )
-            db.add(school_class)
-            db.commit()
-
-        # ── Subject ────────────────────────────────────────────────────────────
-        db_subject = db.query(DBSubject).filter(
-            DBSubject.class_id == school_class.id,
-            DBSubject.name == subject,
-        ).first()
-        if not db_subject:
-            db_subject = DBSubject(class_id=school_class.id, name=subject)
-            db.add(db_subject)
-            db.commit()
-
-        # ── Chapter ────────────────────────────────────────────────────────────
-        db_chapter = db.query(DBChapter).filter(
-            DBChapter.subject_id == db_subject.id,
-            DBChapter.title == chapter_title,
-        ).first()
-        if not db_chapter:
-            db_chapter = DBChapter(
-                subject_id=db_subject.id,
-                title=chapter_title,
-                chapter_number=1,
-            )
-            db.add(db_chapter)
-            db.commit()
-
-        # ── Topics and Content Chunks ──────────────────────────────────────────
-        for i, section in enumerate(sections):
-            # Upsert Topic
-            db_topic = db.query(DBTopic).filter(
-                DBTopic.chapter_id == db_chapter.id,
-                DBTopic.title == section.heading,
-            ).first()
-
-            if not db_topic:
-                db_topic = DBTopic(
-                    chapter_id=db_chapter.id,
-                    title=section.heading,           # LLM-generated heading
-                    topic_number=section.section_number or str(i + 1),
-                    summary=section.summary,         # LLM-generated summary
+        with managed_session() as db:
+            board = db.query(Board).filter(Board.name == "NCERT").first()
+            if not board:
+                board = Board(
+                    name="NCERT",
+                    description="National Council of Educational Research and Training",
                 )
-                db.add(db_topic)
+                db.add(board)
                 db.commit()
-                logger.info(f"  DB ✓ Created topic: \"{section.heading}\"")
-            else:
-                logger.info(f"  DB — Topic exists, skipping: \"{section.heading}\"")
 
-            # Upsert ContentChunk (one per topic, chunk_index=0)
-            existing_chunk = db.query(ContentChunk).filter(
-                ContentChunk.topic_id == db_topic.id,
-                ContentChunk.chunk_index == 0,
+            school_class = db.query(SchoolClass).filter(
+                SchoolClass.board_id == board.id,
+                SchoolClass.level == class_num,
             ).first()
-
-            if not existing_chunk:
-                db.add(ContentChunk(
-                    topic_id=db_topic.id,
-                    content=section.repaired_text,   # LLM-repaired clean content
-                    chunk_index=0,
-                ))
-                logger.info(
-                    f"  DB ✓ Stored chunk for \"{section.heading}\" "
-                    f"({len(section.repaired_text)} chars)"
+            if not school_class:
+                school_class = SchoolClass(
+                    board_id=board.id,
+                    name=f"Class {class_num}",
+                    level=class_num,
                 )
+                db.add(school_class)
+                db.commit()
 
-        db.commit()
-        logger.info("PostgreSQL: all sections saved successfully.")
+            db_subject = db.query(DBSubject).filter(
+                DBSubject.class_id == school_class.id,
+                DBSubject.name == subject,
+            ).first()
+            if not db_subject:
+                db_subject = DBSubject(class_id=school_class.id, name=subject)
+                db.add(db_subject)
+                db.commit()
+
+            db_chapter = db.query(DBChapter).filter(
+                DBChapter.subject_id == db_subject.id,
+                DBChapter.title == chapter_title,
+            ).first()
+            if not db_chapter:
+                db_chapter = DBChapter(
+                    subject_id=db_subject.id,
+                    title=chapter_title,
+                    chapter_number=1,
+                )
+                db.add(db_chapter)
+                db.commit()
+
+            for i, section in enumerate(sections):
+                db_topic = db.query(DBTopic).filter(
+                    DBTopic.chapter_id == db_chapter.id,
+                    DBTopic.title == section.heading,
+                ).first()
+
+                if not db_topic:
+                    db_topic = DBTopic(
+                        chapter_id=db_chapter.id,
+                        title=section.heading,
+                        topic_number=section.section_number or str(i + 1),
+                        summary=section.summary,
+                    )
+                    db.add(db_topic)
+                    db.commit()
+                    logger.info(f"  DB ✓ Created topic: \"{section.heading}\"")
+                else:
+                    logger.info(f"  DB — Topic exists, skipping: \"{section.heading}\"")
+
+                existing_chunk = db.query(ContentChunk).filter(
+                    ContentChunk.topic_id == db_topic.id,
+                    ContentChunk.chunk_index == 0,
+                ).first()
+
+                if not existing_chunk:
+                    db.add(ContentChunk(
+                        topic_id=db_topic.id,
+                        content=section.repaired_text,
+                        chunk_index=0,
+                    ))
+                    logger.info(
+                        f"  DB ✓ Stored chunk for \"{section.heading}\" "
+                        f"({len(section.repaired_text)} chars)"
+                    )
+
+            db.commit()
+            logger.info("PostgreSQL: all sections saved successfully.")
 
     except Exception as e:
         logger.error(f"PostgreSQL error: {e}")
-        db.rollback()
         raise
-    finally:
-        db.close()

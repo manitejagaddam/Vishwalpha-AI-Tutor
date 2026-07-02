@@ -1,3 +1,8 @@
+"""
+db/auth.py
+──────────
+Authentication and student registration logic.
+"""
 import uuid
 import hashlib
 import os
@@ -25,8 +30,10 @@ def verify_password(password: str, hashed_str: str) -> bool:
         return False
 
 def register_student(db: Session, username: str, email: str, password: str, class_num: int) -> Student:
-    """Registers a new student and initializes their overall cognitive profile."""
-    # Check if username or email already exists
+    """
+    Registers a new student and initializes their overall cognitive profile.
+    Raises ValueError if username or email already exists.
+    """
     existing = db.query(Student).filter((Student.username == username) | (Student.email == email)).first()
     if existing:
         raise ValueError("Username or email already exists.")
@@ -43,7 +50,6 @@ def register_student(db: Session, username: str, email: str, password: str, clas
     )
     db.add(student)
 
-    # Initialize empty overall profile
     overall_profile = OverallCognitiveProfile(
         id=str(uuid.uuid4()),
         student_id=student_id,

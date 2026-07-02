@@ -7,9 +7,7 @@ These are the canonical data structures that flow between modules:
   - ProcessedSection  : one repaired + LLM-headed section of a chapter
   - CanonicalCurriculum : the full chapter document exported as JSON
 """
-
 from pydantic import BaseModel, Field
-
 
 class ProcessedSection(BaseModel):
     """
@@ -18,20 +16,12 @@ class ProcessedSection(BaseModel):
     Produced after:
       - TextStructurer detects raw section boundaries (deterministic)
       - LLMStructureRepair repairs the content and generates a proper heading
-
-    Fields:
-        heading       : LLM-generated accurate heading (stored as Topic.title in DB)
-        section_number: Deterministic section number, e.g. "1.1" (may be empty)
-        repaired_text : LLM-repaired clean content (stored as ContentChunk.content in DB)
-        summary       : LLM-generated 2-3 sentence summary (stored as Topic.summary + embedded in Qdrant routing)
-        keywords      : Key educational terms extracted by the LLM
     """
     heading: str
     section_number: str = ""
     repaired_text: str
     summary: str
     keywords: list[str] = Field(default_factory=list)
-
 
 class CanonicalCurriculum(BaseModel):
     """
@@ -48,28 +38,25 @@ class CanonicalCurriculum(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chat / Tutor API Models
-# ─────────────────────────────────────────────────────────────────────────────
-
 class ChatMessage(BaseModel):
     """A single message in a conversation (student or tutor)."""
-    role: str          # "student" or "tutor"
+    role: str
     content: str
 
-
 class RegisterRequest(BaseModel):
+    """Request to register a new student."""
     username: str
     email: str
     password: str
     class_num: int
 
 class LoginRequest(BaseModel):
+    """Request to authenticate a student."""
     username: str
     password: str
 
 class AuthResponse(BaseModel):
+    """Response returned upon successful authentication."""
     student_id: str
     username: str
     class_num: int
@@ -85,13 +72,11 @@ class ChatRequest(BaseModel):
     question: str
     subject: str = Field(default="Science", description="Subject name")
 
-
 class SourceInfo(BaseModel):
     """Metadata about a curriculum source used in the answer."""
     chapter: str
     topic: str
     score: float
-
 
 class ChatResponse(BaseModel):
     """Response returned by the /chat endpoint."""
@@ -99,19 +84,16 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceInfo] = Field(default_factory=list)
     conversation_length: int = 0
-    raw_chunks: list[dict] = Field(default_factory=list, exclude=True)  # not serialised to API
+    raw_chunks: list[dict] = Field(default_factory=list, exclude=True)
     routed_chapter: str = ""
     routed_topic: str = ""
-    question_type: str = "curriculum"   # "curriculum" or "conversational"
-    prompt_messages: list[dict] = Field(default_factory=list, exclude=True)  # exact msgs sent to LLM
+    question_type: str = "curriculum"
+    prompt_messages: list[dict] = Field(default_factory=list, exclude=True)
     metrics: dict = Field(default_factory=dict)
     metrics_adjustments: dict = Field(default_factory=dict)
     cognitive_skills: dict = Field(default_factory=dict)
-
 
 class UpdateMetricsRequest(BaseModel):
     """Request to manually adjust session metrics or apply a profile preset."""
     metrics: dict | None = None
     profile_name: str | None = None
-
-

@@ -7,37 +7,11 @@ Usage:
   python main.py --serve       Start the FastAPI server (default: port 8000)
   python main.py --ingest      Run the PDF ingestion pipeline
   python main.py               Interactive CLI chat for testing
-
-Module layout:
-  schemas.py              — Pydantic models (ingestion + chat)
-  api.py                  — FastAPI endpoints (/chat, /history, /health)
-  tutor/
-    llm.py                — TutorLLM (system prompt + Groq generation)
-    chat.py               — Chat orchestrator (retrieval → LLM → memory)
-  ingestion/
-    pipeline.py           — PDF ingestion flow
-    parser.py             — PDF parsing with layout metadata
-    structurer.py         — Deterministic section boundary detection
-    cleaner.py            — Text noise removal
-    llm_repair.py         — LLM repair: heading + cleaned text + summary
-  db/
-    models.py             — SQLAlchemy ORM models
-    database.py           — DB engine and session factory
-    writer.py             — PostgreSQL curriculum persistence
-    memory.py             — Conversation memory (history + LLM compression)
-  routing/
-    embedder.py           — Sentence embedding (BGE-small)
-    vector_store.py       — Qdrant curriculum_routing collection
-    router.py             — Semantic routing: query → curriculum topic
-  retrieval/
-    engine.py             — Qdrant curriculum_content + retrieval
-    reranker.py           — Context compression
-    cache.py              — Redis query cache
-    query.py              — Retrieval flow (route → retrieve → compress)
 """
 
 import sys
 import logging
+from dotenv import load_dotenv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,33 +21,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from db.database import init_db
-
-# Ensure all PostgreSQL tables exist
 init_db()
 
-
 def run_server():
-    """Start the FastAPI server."""
+    """Starts the FastAPI server."""
     import uvicorn
     logger.info("Starting VishwAlpha AI Tutor API server...")
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
 
-
 def run_ingest():
-    """Run the PDF ingestion pipeline."""
+    """Runs the PDF ingestion pipeline."""
     from ingestion.pipeline import ingest_pdf
-
     ingest_pdf(
         pdf_path="DataSet/Class_10/Science/chapter_2.pdf",
         class_num=10,
         subject="Science",
         chapter="Acids, Bases and Salts",
     )
-
 
 def run_interactive_chat():
     """Interactive CLI chat for quick testing."""
@@ -106,6 +73,7 @@ def run_interactive_chat():
             continue
 
         request = ChatRequest(
+            student_id="test_student",
             session_id=session_id,
             question=question,
             class_num=10,
@@ -113,14 +81,13 @@ def run_interactive_chat():
         )
 
         response = chat(request)
-        session_id = response.session_id  # keep the session alive
+        session_id = response.session_id
 
         print(f"\nTutor > {response.answer}")
         if response.sources:
             sources_str = ", ".join(f"{s.topic} ({s.score})" for s in response.sources)
             print(f"  📚 Sources: {sources_str}")
         print(f"  💬 Turn #{response.conversation_length // 2}\n")
-
 
 if __name__ == "__main__":
     if "--serve" in sys.argv:
