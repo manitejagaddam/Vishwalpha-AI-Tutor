@@ -18,7 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.db_session import managed_session
 from db.database import init_db
 from db.memory import get_history, get_session_message_count
-from db.profile import get_subject_metrics, apply_profile_metrics, update_subject_profile
+from db.profile import get_subject_metrics, update_subject_profile
+from db.metrics import apply_profile_metrics
 from db.models import ConversationSession
 from schemas import ChatRequest, ChatResponse, UpdateMetricsRequest
 from tutor.chat import chat
