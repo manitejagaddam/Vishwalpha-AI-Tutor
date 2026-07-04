@@ -63,6 +63,7 @@ class Topic(Base):
     topic_number = Column(String(50), nullable=True)
     chapter_number = Column(Integer, nullable=True)
     summary = Column(Text, nullable=True)
+    prerequisites = Column(Text, nullable=True)
     
     chapter = relationship("Chapter", back_populates="topics")
     chunks = relationship("ContentChunk", back_populates="topic", cascade="all, delete-orphan")
@@ -77,6 +78,22 @@ class ContentChunk(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     topic = relationship("Topic", back_populates="chunks")
+
+class RawContentChunk(Base):
+    """Stores raw extracted text and LLM finetuned content for future model training."""
+    __tablename__ = "raw_content_chunks"
+    id = Column(Integer, primary_key=True, index=True)
+    topic_id = Column(Integer, ForeignKey("topics.id"), nullable=False)
+    content = Column(Text, nullable=False) # raw extracted text
+    chunk_index = Column(Integer, nullable=False, default=0)
+    fine_tuned_content = Column(Text, nullable=False)
+    class_num = Column(Integer, nullable=True)
+    subject = Column(String(100), nullable=True)
+    chapter = Column(String(200), nullable=True)
+    topic = Column(String(200), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    topic_rel = relationship("Topic")
 
 class Student(Base):
     """Represents an authenticated student."""
@@ -115,6 +132,7 @@ class StudentSubjectProfile(Base):
     last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     student_memory = Column(Text, nullable=True)
     pending_signals = Column(Text, nullable=True)
+    tasks = Column(Text, nullable=True)  # JSON list of student-defined tasks/goals
 
     student = relationship("Student", back_populates="subject_profiles")
 
@@ -154,6 +172,7 @@ class ConversationSession(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     session_remark = Column(Text, nullable=True)
+    diagnostic_state = Column(Text, nullable=True)  # JSON: Socratic diagnostic context
 
     student = relationship("Student", back_populates="sessions")
     messages = relationship(

@@ -274,7 +274,15 @@ def init_backend():
 
 @st.cache_resource(show_spinner=False)
 def get_tutor_chat():
-    # Cache busted to ensure fresh import of tutor.chat
+    import importlib
+    import sys
+    
+    # Force reload modules so our prompt fixes are picked up without a server restart
+    if 'tutor.socratic' in sys.modules:
+        importlib.reload(sys.modules['tutor.socratic'])
+    if 'tutor.chat' in sys.modules:
+        importlib.reload(sys.modules['tutor.chat'])
+        
     from tutor.chat import chat
     return chat
 
@@ -300,11 +308,15 @@ def init_state():
         "show_context": True,     # toggle for the right panel
         "class_num": 10,
         "subject": "Science",
+        "tutor_mode": "standard", # 'standard' or 'deep'
         "turn_count": 0,
         "memory_summary": "",
         "metrics": {},
         "cognitive_skills": {},
         "metrics_adjustments": {},
+        "_sidebar_remark": "",    # cached sidebar data to avoid per-rerun DB calls
+        "_sidebar_memory": [],
+        "_sidebar_summary": "",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -339,6 +351,24 @@ def render_sidebar():
             key="subject_select",
         )
 
+        st.markdown("---")
+        st.markdown("### 🧠 Tutor Mode")
+        st.markdown("<p style='font-size:11px; color:#8888a8; margin-bottom: 8px;'>Deep Learning mode uses Socratic questioning to find and fix knowledge gaps before giving the answer.</p>", unsafe_allow_html=True)
+        
+        mode_options = {"standard": "Standard (Direct)", "deep": "Deep Learning (Socratic)"}
+        selected_mode_label = st.radio(
+            "Mode",
+            options=list(mode_options.values()),
+            index=0 if st.session_state.tutor_mode == "standard" else 1,
+            label_visibility="collapsed"
+        )
+        
+        # Reverse lookup mode key
+        for k, v in mode_options.items():
+            if v == selected_mode_label:
+                st.session_state.tutor_mode = k
+                break
+
         # New Session button
         if st.button("🆕 New Session", use_container_width=True):
             st.session_state.session_id = ""
@@ -356,7 +386,12 @@ def render_sidebar():
         # Past Sessions Dropdown
         if st.session_state.student_id:
             from db.memory import get_student_sessions, get_full_session_messages
-            past_sessions = get_student_sessions(st.session_state.student_id, st.session_state.subject)
+
+            @st.cache_data(ttl=30, show_spinner=False)
+            def _cached_sessions(student_id, subject):
+                return get_student_sessions(student_id, subject)
+
+            past_sessions = _cached_sessions(st.session_state.student_id, st.session_state.subject)
             if past_sessions:
                 session_options = {s["id"]: f"{s['created_at'].strftime('%Y-%m-%d %H:%M')} ({s['message_count']} msgs)" for s in past_sessions}
                 # Add a dummy default option to represent the current unsaved session if no session is active yet
@@ -439,29 +474,29 @@ def render_sidebar():
                 finally:
                     db.close()
 
-        # Session Remark (teacher-style performance note, updated every 4 turns)
+        # Session Remark — use cached value to avoid per-rerun DB read
         if st.session_state.session_id:
-            st.markdown("---")
-            st.markdown("### 📝 Session Remarks")
-            from db.memory import get_session_remark
-            remark = get_session_remark(st.session_state.session_id)
+            remark = st.session_state.get("_sidebar_remark", "")
             if remark:
+                st.markdown("---")
+                st.markdown("### 📝 Session Remarks")
                 st.markdown(
                     f'<div class="memory-card" style="border-left: 3px solid #a0aaf0;">{remark}</div>',
                     unsafe_allow_html=True
                 )
             else:
+                st.markdown("---")
+                st.markdown("### 📝 Session Remarks")
                 st.markdown(
                     "<p style='font-size:11px; color:#707090;'>Remarks will appear after every 4 turns of conversation.</p>",
                     unsafe_allow_html=True
                 )
 
-        # Student Memory (persistent cross-session facts)
+        # Student Memory (persistent cross-session facts) — use cached value
         if st.session_state.student_id:
             st.markdown("---")
             st.markdown("### 🧠 Learning Memory")
-            from db.memory import get_student_memory
-            mem = get_student_memory(st.session_state.student_id, st.session_state.subject)
+            mem = st.session_state.get("_sidebar_memory", [])
             if mem:
                 for entry in mem:
                     st.markdown(
@@ -475,24 +510,15 @@ def render_sidebar():
                     unsafe_allow_html=True
                 )
 
-        # Conversation Summary (compressed older turns memory)
-        if st.session_state.session_id:
-            from db.models import ConversationSession
-            from db.database import SessionLocal
-            _db = SessionLocal()
-            try:
-                sess = _db.query(ConversationSession).filter(ConversationSession.id == st.session_state.session_id).first()
-                live_summary = sess.summary if sess else ""
-            finally:
-                _db.close()
-            
-            if live_summary:
-                st.markdown("---")
-                st.markdown("### 📚 Conversation Summary")
-                st.markdown(
-                    f'<div class="memory-card">{live_summary}</div>',
-                    unsafe_allow_html=True
-                )
+        # Conversation Summary (use cached value to avoid per-rerun DB read)
+        live_summary = st.session_state.get("_sidebar_summary", "")
+        if live_summary:
+            st.markdown("---")
+            st.markdown("### 📚 Conversation Summary")
+            st.markdown(
+                f'<div class="memory-card">{live_summary}</div>',
+                unsafe_allow_html=True
+            )
 
         # Manual Score Control Slider Expander
         if st.session_state.session_id:
@@ -1012,8 +1038,13 @@ def render_chat():
 
     # Chat history
     st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
-    for msg in st.session_state.messages:
-        render_message(msg)
+    if not st.session_state.messages:
+        mode_text = "Standard" if st.session_state.tutor_mode == "standard" else "Deep Learning (Socratic)"
+        greeting = f"Namaste! I'm VishwAlpha, your NCERT AI Tutor. I see you're using **{mode_text}** mode.\n\nWhat would you like to learn today?"
+        render_message({"role": "tutor", "content": greeting})
+    else:
+        for msg in st.session_state.messages:
+            render_message(msg)
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -1023,16 +1054,24 @@ def handle_input(question: str):
 
     chat_fn = get_tutor_chat()
 
-    # Add student message immediately
+    # Add student message immediately so it renders before the spinner
     st.session_state.messages.append({"role": "student", "content": question})
 
-    with st.spinner("🤔 Thinking..."):
+    # Show student message instantly, then spinner while LLM processes
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        thinking_placeholder = st.empty()
+        thinking_placeholder.markdown("🤔 *Thinking...*")
+
         try:
             request = ChatRequest(
                 student_id=st.session_state.student_id,
                 session_id=st.session_state.session_id,
                 question=question,
                 subject=st.session_state.subject,
+                tutor_mode=st.session_state.tutor_mode,
             )
             response = chat_fn(request)
 
@@ -1042,6 +1081,17 @@ def handle_input(question: str):
             st.session_state.metrics = response.metrics
             st.session_state.cognitive_skills = getattr(response, "cognitive_skills", {})
             st.session_state.metrics_adjustments = getattr(response, "metrics_adjustments", {})
+
+            # Cache sidebar data so sidebar doesn't re-query DB on next rerun
+            from db.memory import get_session_remark, get_student_memory
+            st.session_state["_sidebar_remark"] = get_session_remark(response.session_id)
+            st.session_state["_sidebar_memory"] = get_student_memory(
+                st.session_state.student_id, st.session_state.subject
+            )
+            st.session_state["_sidebar_summary"] = response.answer[:0] or ""  # placeholder; updated below
+
+            # Clear thinking placeholder and render answer
+            thinking_placeholder.empty()
 
             # Store tutor response with all metadata for rendering
             st.session_state.messages.append({
@@ -1058,20 +1108,27 @@ def handle_input(question: str):
                 "cognitive_skills": response.cognitive_skills,
             })
 
-            # Update memory summary in sidebar
+            # Render the answer immediately in the same chat_message block
+            st.markdown(response.answer)
+
+            # Update memory summary in sidebar cache
             from db.memory import get_history
             memory_summary, _ = get_history(response.session_id)
             st.session_state.memory_summary = memory_summary
+            st.session_state["_sidebar_summary"] = memory_summary
 
         except Exception as e:
+            thinking_placeholder.empty()
+            error_msg = f"⚠️ Error: {str(e)}\n\nPlease check that the API server is running and all environment variables are set."
             st.session_state.messages.append({
                 "role": "tutor",
-                "content": f"⚠️ Error: {str(e)}\n\nPlease check that the API server is running and all environment variables are set.",
+                "content": error_msg,
                 "sources": [],
                 "chunks": [],
                 "chapter": "",
                 "topic": "",
             })
+            st.markdown(error_msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1179,7 +1236,6 @@ def main():
         )
         if question and question.strip():
             handle_input(question.strip())
-            st.rerun()
 
     if ctx_col is not None:
         with ctx_col:

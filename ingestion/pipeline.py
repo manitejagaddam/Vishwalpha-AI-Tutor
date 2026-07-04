@@ -160,8 +160,10 @@ def _repair_and_store(
             heading=repaired.heading,
             section_number=raw.get("section_number", ""),
             repaired_text=repaired.repaired_text,
+            raw_extracted_text=raw_content,
             summary=repaired.summary,
             keywords=repaired.keywords,
+            prerequisites=repaired.prerequisites,
         )
         processed.append(section)
 

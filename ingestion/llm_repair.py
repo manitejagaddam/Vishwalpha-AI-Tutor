@@ -24,6 +24,7 @@ class RepairedSection(BaseModel):
     repaired_text: str
     summary: str
     keywords: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
 
 
 class LLMStructureRepair:
@@ -76,10 +77,11 @@ I will give you a raw chunk of text extracted from a PDF textbook. The text may 
 {hint_line}
 
 Your tasks:
-1. REPAIR the text — fix all OCR errors, re-join broken words/sentences, remove noise.
+1. REPAIR AND EXPAND the text — fix all OCR errors, re-join broken words/sentences, and remove noise. MOST IMPORTANTLY, the `repaired_text` should be highly detailed, accurate to NCERT syllabus, and written in a clear, well-explained manner so a student can easily understand it. If the raw content is terse, structure and expand it logically.
 2. GENERATE a precise, descriptive heading that accurately reflects what this specific content is about. The heading should read like a textbook section title (e.g., "Types of Chemical Reactions", "Photosynthesis and Chlorophyll").
 3. SUMMARIZE the repaired content in 2-3 clear sentences for a student.
 4. EXTRACT 3-5 key educational terms from the content.
+5. IDENTIFY PREREQUISITES — list 3-5 prerequisite topics or concepts a student must know BEFORE studying this section (appropriate for the NCERT curriculum).
 
 Raw content:
 \"\"\"
@@ -89,9 +91,10 @@ Raw content:
 Return ONLY valid JSON matching this exact structure:
 {{
   "heading": "Your generated section heading here",
-  "repaired_text": "The fully repaired and cleaned content here",
+  "repaired_text": "The highly detailed, properly formatted, and fully explained content here",
   "summary": "A 2-3 sentence summary of the content",
-  "keywords": ["keyword1", "keyword2", "keyword3"]
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "prerequisites": ["prerequisite1", "prerequisite2", "prerequisite3"]
 }}"""
 
         time.sleep(RATE_LIMIT_SLEEP)  # Mandatory rate limit pause
@@ -128,5 +131,6 @@ Return ONLY valid JSON matching this exact structure:
             heading=section_hint if section_hint else "Untitled Section",
             repaired_text=raw_content,
             summary="Summary unavailable.",
-            keywords=[]
+            keywords=[],
+            prerequisites=[]
         )

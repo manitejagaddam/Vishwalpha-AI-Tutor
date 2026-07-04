@@ -9,6 +9,20 @@ These are the canonical data structures that flow between modules:
 """
 from pydantic import BaseModel, Field
 
+
+class RawContentChunk(BaseModel):
+    """
+    A raw chunk of content from the textbook.
+    """
+    content: str
+    chunk_index: int
+    created_at: str
+    fine_tuned_content: str
+    class_num: int
+    subject: str
+    chapter: str
+    topic: str
+
 class ProcessedSection(BaseModel):
     """
     A fully processed section of a chapter.
@@ -20,8 +34,10 @@ class ProcessedSection(BaseModel):
     heading: str
     section_number: str = ""
     repaired_text: str
+    raw_extracted_text: str = ""
     summary: str
     keywords: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
 
 class CanonicalCurriculum(BaseModel):
     """
@@ -71,6 +87,10 @@ class ChatRequest(BaseModel):
     )
     question: str
     subject: str = Field(default="Science", description="Subject name")
+    tutor_mode: str = Field(
+        default="standard",
+        description="'standard' = direct answer (default). 'deep' = Socratic diagnostic mode."
+    )
 
 class SourceInfo(BaseModel):
     """Metadata about a curriculum source used in the answer."""
@@ -92,6 +112,9 @@ class ChatResponse(BaseModel):
     metrics: dict = Field(default_factory=dict)
     metrics_adjustments: dict = Field(default_factory=dict)
     cognitive_skills: dict = Field(default_factory=dict)
+    diagnostic_question: str = ""
+    is_session_start: bool = False
+    pending_tasks: list[str] = Field(default_factory=list)
 
 class UpdateMetricsRequest(BaseModel):
     """Request to manually adjust session metrics or apply a profile preset."""

@@ -20,9 +20,22 @@ def run_migration():
             
         try:
             conn.execute(text("ALTER TABLE topics ADD COLUMN IF NOT EXISTS chapter_number INTEGER;"))
+            conn.execute(text("ALTER TABLE topics ADD COLUMN IF NOT EXISTS prerequisites TEXT;"))
             conn.commit()
         except Exception as e:
             print(f"Error altering topics: {e}")
+
+        try:
+            conn.execute(text("ALTER TABLE student_subject_profiles ADD COLUMN IF NOT EXISTS tasks TEXT;"))
+            conn.commit()
+        except Exception as e:
+            print(f"Error altering student_subject_profiles: {e}")
+
+        try:
+            conn.execute(text("ALTER TABLE conversation_sessions ADD COLUMN IF NOT EXISTS diagnostic_state TEXT;"))
+            conn.commit()
+        except Exception as e:
+            print(f"Error altering conversation_sessions: {e}")
             
     print("Creating new tables...")
     Base.metadata.create_all(bind=engine)

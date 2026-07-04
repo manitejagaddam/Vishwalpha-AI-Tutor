@@ -16,8 +16,10 @@ from db.models import (
     Chapter as DBChapter,
     Topic as DBTopic,
     ContentChunk,
+    RawContentChunk as DBRawContentChunk,
 )
 from schemas import ProcessedSection
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,7 @@ def save_to_postgres(
                         title=section.heading,
                         topic_number=section.section_number or str(i + 1),
                         summary=section.summary,
+                        prerequisites=json.dumps(section.prerequisites) if section.prerequisites else None,
                     )
                     db.add(db_topic)
                     db.commit()
@@ -118,8 +121,21 @@ def save_to_postgres(
                         content=section.repaired_text,
                         chunk_index=0,
                     ))
+                    
+                    # Store raw extraction and finetuned text for model training
+                    db.add(DBRawContentChunk(
+                        topic_id=db_topic.id,
+                        class_num=class_num,
+                        subject=subject,
+                        chapter=chapter_title,
+                        topic=section.heading,
+                        content=section.raw_extracted_text,
+                        chunk_index=0,
+                        fine_tuned_content=section.repaired_text,
+                    ))
+                    
                     logger.info(
-                        f"  DB ✓ Stored chunk for \"{section.heading}\" "
+                        f"  DB ✓ Stored chunk and training data for \"{section.heading}\" "
                         f"({len(section.repaired_text)} chars)"
                     )
 

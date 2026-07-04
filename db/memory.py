@@ -400,3 +400,107 @@ def cleanup_old_prompt_logs(days: int = 5):
         except Exception as e:
             logger.error(f"Failed to cleanup old prompt logs: {e}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostic state helpers (Socratic Deep Mode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_diagnostic_state(session_id: str) -> dict | None:
+    """Returns the current Socratic diagnostic state JSON for a session, or None."""
+    with managed_session() as db:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        if session and session.diagnostic_state:
+            try:
+                return json.loads(session.diagnostic_state)
+            except Exception:
+                return None
+        return None
+
+def set_diagnostic_state(session_id: str, state: dict | None) -> None:
+    """
+    Saves a Socratic diagnostic state to the session row.
+    Pass None to clear the state after the diagnostic is resolved.
+    """
+    with managed_session() as db:
+        session = db.query(ConversationSession).filter(
+            ConversationSession.id == session_id
+        ).first()
+        if session:
+            session.diagnostic_state = json.dumps(state) if state else None
+            db.commit()
+
+def is_new_session(session_id: str) -> bool:
+    """Returns True if the session has no messages yet (brand new session)."""
+    with managed_session() as db:
+        count = db.query(ConversationMessage).filter(
+            ConversationMessage.session_id == session_id
+        ).count()
+        return count == 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Student task helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_student_tasks(student_id: str, subject: str) -> list[str]:
+    """Returns the persistent tasks list for a student in a subject."""
+    with managed_session() as db:
+        try:
+            from db.models import StudentSubjectProfile
+            profile = db.query(StudentSubjectProfile).filter(
+                StudentSubjectProfile.student_id == student_id,
+                StudentSubjectProfile.subject == subject,
+            ).first()
+            if not profile or not profile.tasks:
+                return []
+            return json.loads(profile.tasks)
+        except Exception:
+            return []
+
+def add_student_task(student_id: str, subject: str, task: str) -> list[str]:
+    """
+    Appends a new task to the student's task list (max 10 tasks kept).
+    Returns the updated task list.
+    """
+    with managed_session() as db:
+        try:
+            from db.models import StudentSubjectProfile
+            profile = db.query(StudentSubjectProfile).filter(
+                StudentSubjectProfile.student_id == student_id,
+                StudentSubjectProfile.subject == subject,
+            ).first()
+            if not profile:
+                return []
+            existing = json.loads(profile.tasks or "[]")
+            if task not in existing:
+                existing.append(task)
+            profile.tasks = json.dumps(existing[-10:])
+            db.commit()
+            return json.loads(profile.tasks)
+        except Exception as e:
+            logger.warning(f"add_student_task failed: {e}")
+            return []
+
+def complete_student_task(student_id: str, subject: str, task: str) -> list[str]:
+    """
+    Removes a completed task from the student's task list.
+    Returns the updated task list.
+    """
+    with managed_session() as db:
+        try:
+            from db.models import StudentSubjectProfile
+            profile = db.query(StudentSubjectProfile).filter(
+                StudentSubjectProfile.student_id == student_id,
+                StudentSubjectProfile.subject == subject,
+            ).first()
+            if not profile:
+                return []
+            existing = json.loads(profile.tasks or "[]")
+            updated = [t for t in existing if t != task]
+            profile.tasks = json.dumps(updated)
+            db.commit()
+            return updated
+        except Exception as e:
+            logger.warning(f"complete_student_task failed: {e}")
+            return []
