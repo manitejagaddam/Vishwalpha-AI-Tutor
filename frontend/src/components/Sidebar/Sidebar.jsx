@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
-import { LogOut, BookOpen, BrainCircuit, Activity, RefreshCw } from 'lucide-react';
+import { LogOut, BrainCircuit, Activity, BookOpen, Clock } from 'lucide-react';
 
 export default function Sidebar() {
   const { student, logout } = useAuth();
@@ -9,98 +9,112 @@ export default function Sidebar() {
     subject, setSubject, 
     tutorMode, setTutorMode,
     sessions, loadSession, sessionId,
-    memory,
-    metrics, cognitiveSkills,
-    sessionRemark
+    memory, sessionRemark
   } = useSession();
 
   return (
-    <div className="w-80 bg-white/5 border-r border-white/10 flex flex-col h-full overflow-y-auto backdrop-blur-xl">
-      <div className="p-4 border-b border-white/10 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-lg font-bold shadow-lg">
-            {student.username[0].toUpperCase()}
+    <div className="glass-panel flex flex-col h-full overflow-y-auto">
+      {/* Profile Section */}
+      <div className="p-5 border-b border-white/5 bg-gradient-to-b from-white/5 to-transparent">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-xl font-bold shadow-[0_0_15px_rgba(99,102,241,0.5)] border border-white/20">
+              {student.username[0].toUpperCase()}
+            </div>
+            <div>
+              <div className="font-bold text-white text-lg tracking-wide">{student.username}</div>
+              <div className="text-xs text-indigo-300 font-medium bg-indigo-500/10 px-2 py-0.5 rounded-full inline-block mt-1 border border-indigo-500/20">
+                Class {student.class_num}
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="font-semibold">{student.username}</div>
-            <div className="text-xs text-gray-400">Class {student.class_num}</div>
-          </div>
+          <button onClick={logout} className="p-2 hover:bg-white/10 rounded-full transition-all hover:scale-110 hover:text-pink-400" title="Logout">
+            <LogOut size={18} className="text-gray-400 hover:text-pink-400" />
+          </button>
         </div>
-        <button onClick={logout} className="p-2 hover:bg-white/10 rounded-full transition-colors" title="Logout">
-          <LogOut size={18} className="text-gray-400" />
-        </button>
       </div>
 
-      <div className="p-4 space-y-6 flex-1">
+      <div className="p-5 space-y-8 flex-1">
         
         {/* Controls */}
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs text-gray-400 uppercase font-semibold tracking-wider">Subject</label>
-            <select 
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg p-2 text-sm focus:outline-none focus:border-indigo-500"
-            >
-              <option value="Science">Science</option>
-              <option value="Mathematics">Mathematics</option>
-              <option value="Social Science">Social Science</option>
-            </select>
+        <div className="space-y-4">
+          <div className="group">
+            <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest mb-1.5 block group-hover:text-indigo-400 transition-colors">Subject Focus</label>
+            <div className="relative">
+              <select 
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 appearance-none transition-all shadow-inner hover:bg-black/60"
+              >
+                <option value="Science">🧪 Science</option>
+                <option value="Mathematics">📐 Mathematics</option>
+                <option value="Social Science">🌍 Social Science</option>
+              </select>
+            </div>
           </div>
           
-          <div>
-            <label className="text-xs text-gray-400 uppercase font-semibold tracking-wider">Tutor Mode</label>
+          <div className="group">
+            <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest mb-1.5 block group-hover:text-purple-400 transition-colors">Learning Mode</label>
             <select 
               value={tutorMode}
               onChange={(e) => setTutorMode(e.target.value)}
-              className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg p-2 text-sm focus:outline-none focus:border-indigo-500"
+              className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 appearance-none transition-all shadow-inner hover:bg-black/60"
             >
-              <option value="standard">Standard</option>
-              <option value="deep">Deep Learning (Socratic)</option>
+              <option value="standard">⚡ Standard Direct</option>
+              <option value="deep">🧠 Deep Socratic</option>
             </select>
           </div>
         </div>
 
         {/* Sessions */}
         <div>
-          <label className="text-xs text-gray-400 uppercase font-semibold tracking-wider flex justify-between items-center mb-2">
-            <span>Past Sessions</span>
-            <button onClick={() => loadSession('')} className="text-indigo-400 hover:text-indigo-300 normal-case text-xs">
-              + New Session
+          <div className="flex justify-between items-center mb-3">
+            <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest flex items-center gap-1.5">
+              <Clock size={12} className="text-blue-400" /> Past Sessions
+            </label>
+            <button onClick={() => loadSession('')} className="bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-3 py-1 rounded-full text-xs font-bold transition-all border border-indigo-500/30 hover:scale-105">
+              + New
             </button>
-          </label>
-          <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+          </div>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
             {sessions.map(s => (
               <button
                 key={s.id}
                 onClick={() => loadSession(s.id)}
-                className={`w-full text-left p-2 rounded text-sm truncate ${s.id === sessionId ? 'bg-indigo-500/20 text-indigo-300' : 'hover:bg-white/5 text-gray-300'}`}
+                className={`w-full text-left p-3 rounded-xl text-sm truncate transition-all flex items-center justify-between border ${
+                  s.id === sessionId 
+                    ? 'bg-gradient-to-r from-indigo-600/30 to-purple-600/10 border-indigo-500/50 text-white shadow-[inset_0_0_10px_rgba(99,102,241,0.2)]' 
+                    : 'bg-black/20 border-transparent text-gray-400 hover:bg-white/5 hover:border-white/10 hover:text-gray-200'
+                }`}
               >
-                {new Date(s.created_at).toLocaleDateString()} - {s.subject}
+                <span>{new Date(s.created_at).toLocaleDateString()}</span>
+                <span className="text-[10px] opacity-60 bg-black/30 px-2 py-0.5 rounded">{s.subject}</span>
               </button>
             ))}
-            {sessions.length === 0 && <div className="text-xs text-gray-500 italic">No past sessions</div>}
+            {sessions.length === 0 && <div className="text-xs text-gray-500 italic p-2 bg-black/20 rounded-lg text-center">No past sessions</div>}
           </div>
         </div>
 
         {/* Remarks */}
         {sessionRemark && (
-          <div className="bg-indigo-500/10 border border-indigo-500/20 p-3 rounded-lg">
-            <div className="text-xs text-indigo-300 font-semibold mb-1 flex items-center gap-1">
-              <Activity size={12} />
+          <div className="glass-card p-4 rounded-xl relative overflow-hidden group">
+            <div className="absolute top-0 right-0 w-16 h-16 bg-blue-500/10 rounded-bl-full -z-10 group-hover:scale-150 transition-transform duration-500" />
+            <div className="text-xs text-blue-300 font-extrabold mb-2 flex items-center gap-1.5 uppercase tracking-wide">
+              <Activity size={14} />
               Session Insights
             </div>
-            <div className="text-xs text-gray-300">{sessionRemark}</div>
+            <div className="text-sm text-gray-200 leading-relaxed font-medium">{sessionRemark}</div>
           </div>
         )}
 
         {/* Memory */}
-        <div>
-          <label className="text-xs text-gray-400 uppercase font-semibold tracking-wider mb-2 block flex items-center gap-1">
+        <div className="pb-4">
+          <label className="text-[10px] text-emerald-400 uppercase font-extrabold tracking-widest mb-3 flex items-center gap-1.5">
             <BrainCircuit size={14} />
-            Learning Memory
+            Long-term Memory
           </label>
-          <div className="bg-white/5 border border-white/10 p-3 rounded-lg text-xs text-gray-300 max-h-40 overflow-y-auto whitespace-pre-wrap">
+          <div className="bg-black/30 border border-emerald-500/20 p-4 rounded-xl text-sm text-gray-300 max-h-48 overflow-y-auto whitespace-pre-wrap shadow-inner leading-relaxed relative group">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
             {memory || <span className="text-gray-500 italic">No memory data yet...</span>}
           </div>
         </div>

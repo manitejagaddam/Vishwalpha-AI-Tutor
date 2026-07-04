@@ -131,7 +131,8 @@ def get_student_sessions(student_id: str, subject: str) -> list[dict]:
     with managed_session() as db:
         sessions = db.query(ConversationSession).filter(
             ConversationSession.student_id == student_id,
-            ConversationSession.subject == subject
+            ConversationSession.subject == subject,
+            ConversationSession.messages.any()
         ).order_by(ConversationSession.updated_at.desc()).all()
         
         return [
