@@ -16,12 +16,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.db_session import managed_session
-from db.database import init_db
-from db.memory import get_history, get_session_message_count
+from db.database import init_db, SessionLocal
+from db.memory import get_history, get_session_message_count, get_student_sessions, get_student_memory, get_session_remark
 from db.profile import get_subject_metrics, update_subject_profile
-from db.metrics import apply_profile_metrics
+from db.metrics import apply_profile_metrics, compute_cognitive_skills
 from db.models import ConversationSession
-from schemas import ChatRequest, ChatResponse, UpdateMetricsRequest
+from db.auth import register_student, login_student
+from schemas import (
+    ChatRequest, ChatResponse, UpdateMetricsRequest,
+    RegisterRequest, LoginRequest, AuthResponse
+)
 from tutor.chat import chat
 
 logger = logging.getLogger(__name__)
@@ -67,6 +71,69 @@ def chat_endpoint(request: ChatRequest):
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while processing your question.")
+
+@app.post("/auth/register", response_model=AuthResponse)
+def register_endpoint(request: RegisterRequest):
+    db = SessionLocal()
+    try:
+        student = register_student(
+            db=db,
+            username=request.username,
+            email=request.email,
+            password=request.password,
+            class_num=request.class_num
+        )
+        return AuthResponse(
+            student_id=student.id,
+            username=student.username,
+            class_num=student.class_num,
+            message="Registration successful"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login_endpoint(request: LoginRequest):
+    db = SessionLocal()
+    try:
+        student = login_student(db, request.username, request.password)
+        if not student:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        return AuthResponse(
+            student_id=student.id,
+            username=student.username,
+            class_num=student.class_num,
+            message="Login successful"
+        )
+    finally:
+        db.close()
+
+@app.get("/sessions")
+def get_sessions_endpoint(student_id: str, subject: str = "Science"):
+    """Get all past sessions for a student."""
+    sessions = get_student_sessions(student_id, subject)
+    return {"sessions": sessions}
+
+@app.get("/student/memory")
+def get_student_memory_endpoint(student_id: str, subject: str = "Science"):
+    """Get learning memory for a student."""
+    memory_str = get_student_memory(student_id, subject)
+    return {"memory": memory_str}
+
+@app.get("/student/profile")
+def get_student_profile_endpoint(student_id: str, subject: str = "Science"):
+    """Get cognitive metrics for a student."""
+    with managed_session() as db:
+        metrics = get_subject_metrics(db, student_id, subject)
+        skills = compute_cognitive_skills(metrics)
+    return {"metrics": metrics, "cognitive_skills": skills}
+
+@app.get("/sessions/{session_id}/remark")
+def get_session_remark_endpoint(session_id: str):
+    remark = get_session_remark(session_id)
+    return {"remark": remark}
 
 @app.get("/history/{session_id}")
 def history_endpoint(session_id: str):
