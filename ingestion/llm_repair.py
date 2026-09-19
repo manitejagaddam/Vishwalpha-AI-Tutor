@@ -44,7 +44,7 @@ class LLMStructureRepair:
         if not api_key:
             logger.warning("GROQ_API_KEY not found in environment.")
         self.client = Groq(api_key=api_key)
-        self.model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
     def repair_section(self, raw_content: str, section_hint: str = "") -> RepairedSection:
         """

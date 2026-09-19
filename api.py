@@ -12,15 +12,17 @@ Endpoints:
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from core.db_session import managed_session
 from db.database import init_db, SessionLocal
 from db.memory import get_history, get_session_message_count, get_student_sessions, get_student_memory, get_session_remark
 from db.profile import get_subject_metrics, update_subject_profile
 from db.metrics import apply_profile_metrics, compute_cognitive_skills
-from db.models import ConversationSession
+from db.models import ConversationSession, CurriculumRouting
 from db.auth import register_student, login_student
 from schemas import (
     ChatRequest, ChatResponse, UpdateMetricsRequest,
@@ -196,3 +198,66 @@ def update_metrics_endpoint(session_id: str, request: UpdateMetricsRequest):
         except Exception as e:
             logger.error(f"Error updating metrics: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to update metrics: {str(e)}")
+
+
+# ── Phase 1.8 — Curriculum Browse Endpoints ──────────────────────────────────
+
+def get_db():
+    """Dependency that yields a DB session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.get("/curriculum/subjects")
+def get_subjects_endpoint(class_num: int, db: Session = Depends(get_db)):
+    """
+    Returns all distinct subjects available for a given class.
+    Used by the frontend to populate the subject dropdown.
+    """
+    rows = (
+        db.query(CurriculumRouting.subject)
+        .filter(CurriculumRouting.class_num == class_num)
+        .distinct()
+        .all()
+    )
+    return {"subjects": [r[0] for r in rows if r[0]]}
+
+
+@app.get("/curriculum/chapters")
+def get_chapters_endpoint(class_num: int, subject: str, db: Session = Depends(get_db)):
+    """
+    Returns all distinct chapters for a given class and subject.
+    Uses case-insensitive subject matching.
+    """
+    rows = (
+        db.query(CurriculumRouting.chapter)
+        .filter(
+            CurriculumRouting.class_num == class_num,
+            func.lower(CurriculumRouting.subject) == subject.lower(),
+        )
+        .distinct()
+        .all()
+    )
+    return {"chapters": [r[0] for r in rows if r[0]]}
+
+
+@app.get("/curriculum/topics")
+def get_topics_endpoint(class_num: int, subject: str, chapter: str, db: Session = Depends(get_db)):
+    """
+    Returns all distinct topics for a given class, subject, and chapter.
+    Uses case-insensitive matching on both subject and chapter.
+    """
+    rows = (
+        db.query(CurriculumRouting.topic)
+        .filter(
+            CurriculumRouting.class_num == class_num,
+            func.lower(CurriculumRouting.subject) == subject.lower(),
+            func.lower(CurriculumRouting.chapter) == chapter.lower(),
+        )
+        .distinct()
+        .all()
+    )
+    return {"topics": [r[0] for r in rows if r[0]]}

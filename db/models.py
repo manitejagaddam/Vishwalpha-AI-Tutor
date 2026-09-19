@@ -3,7 +3,7 @@ db/models.py
 ────────────
 SQLAlchemy ORM models for curriculum, identity, cognitive profiles, and conversation memory.
 """
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Float, Boolean
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Float, Boolean, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
@@ -67,6 +67,61 @@ class Topic(Base):
     
     chapter = relationship("Chapter", back_populates="topics")
     chunks = relationship("ContentChunk", back_populates="topic", cascade="all, delete-orphan")
+
+class TopicPrerequisite(Base):
+    """
+    Structured prerequisite links between topics.
+    Replaces topics.prerequisites unstructured JSON string.
+    Enables cross-class backtracking by resolving prerequisites to actual DB content.
+    """
+    __tablename__ = "topic_prerequisites"
+    id = Column(Integer, primary_key=True, index=True)
+
+    topic_id           = Column(Integer, ForeignKey("topics.id"), nullable=False, index=True)
+    prereq_topic_id    = Column(Integer, ForeignKey("topics.id"), nullable=True)
+
+    prereq_class_num   = Column(Integer,     nullable=False)
+    prereq_subject     = Column(String(100), nullable=False)
+    prereq_chapter     = Column(String(200), nullable=True)
+    prereq_description = Column(Text,        nullable=False)
+
+    difficulty_order   = Column(Integer, default=0)            # 0 = most foundational
+    expected_keywords  = Column(Text, nullable=True)            # JSON list
+
+    source = Column(String(20), default="llm_inferred")        # "manual" | "llm_inferred"
+
+    topic  = relationship("Topic", foreign_keys=[topic_id])
+    prereq = relationship("Topic", foreign_keys=[prereq_topic_id])
+
+
+class StudentTopicMastery(Base):
+    """Per-student, per-topic understanding tracker. Replaces flat student_memory bullets."""
+    __tablename__ = "student_topic_mastery"
+    id = Column(Integer, primary_key=True, index=True)
+
+    student_id = Column(String(100), ForeignKey("students.id"), nullable=False, index=True)
+    topic_id   = Column(Integer, ForeignKey("topics.id"),   nullable=False, index=True)
+
+    mastery_level       = Column(Float,   default=0.0,  nullable=False)   # 0–100
+    times_visited       = Column(Integer, default=0,    nullable=False)
+    last_visited        = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    first_visited       = Column(DateTime(timezone=True), server_default=func.now())
+
+    understood_concepts = Column(Text, nullable=True)   # JSON list
+    confused_concepts   = Column(Text, nullable=True)   # JSON list
+    common_mistakes     = Column(Text, nullable=True)   # JSON list
+
+    required_backtrack  = Column(Boolean, default=False)
+    backtrack_depth     = Column(Integer, default=0)
+    backtrack_class     = Column(Integer, nullable=True)
+
+    student = relationship("Student")
+    topic   = relationship("Topic")
+
+    __table_args__ = (
+        UniqueConstraint("student_id", "topic_id", name="uq_student_topic_mastery"),
+    )
+
 
 class ContentChunk(Base):
     """Represents a chunk of textbook content associated with a topic."""
@@ -205,12 +260,12 @@ class CurriculumRouting(Base):
     Equivalent to the Qdrant curriculum_routing collection.
     """
     __tablename__ = "curriculum_routing"
-    id = Column(String(100), primary_key=True)
-    class_num = Column(Integer, nullable=True)
-    subject = Column(String(100), nullable=True)
-    chapter = Column(String(200), nullable=True)
-    topic = Column(String(200), nullable=True)
-    vector = Column(Vector(384), nullable=False)
+    id        = Column(String(100), primary_key=True)
+    class_num = Column(Integer,     nullable=True, index=True)   # indexed for pre-filter
+    subject   = Column(String(100), nullable=True, index=True)   # indexed for pre-filter
+    chapter   = Column(String(200), nullable=True, index=True)   # indexed for pre-filter
+    topic     = Column(String(200), nullable=True)
+    vector    = Column(Vector(384), nullable=False)
 
 class CurriculumContent(Base):
     """
@@ -218,13 +273,13 @@ class CurriculumContent(Base):
     Equivalent to the Qdrant curriculum_content collection.
     """
     __tablename__ = "curriculum_content"
-    id = Column(String(100), primary_key=True)
-    class_num = Column(Integer, nullable=True)
-    subject = Column(String(100), nullable=True)
-    chapter = Column(String(200), nullable=True)
-    topic = Column(String(200), nullable=True)
-    content = Column(Text, nullable=False)
-    vector = Column(Vector(384), nullable=False)
+    id        = Column(String(100), primary_key=True)
+    class_num = Column(Integer,     nullable=True, index=True)   # indexed for pre-filter
+    subject   = Column(String(100), nullable=True, index=True)   # indexed for pre-filter
+    chapter   = Column(String(200), nullable=True, index=True)   # indexed for pre-filter
+    topic     = Column(String(200), nullable=True)
+    content   = Column(Text, nullable=False)
+    vector    = Column(Vector(384), nullable=False)
 
 class PromptLog(Base):
     """

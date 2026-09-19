@@ -244,7 +244,7 @@ def _compress_old_memory(db, session_id: str) -> None:
 
     try:
         client = get_groq()
-        model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+        model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
         response = client.chat.completions.create(
             messages=[
@@ -329,7 +329,7 @@ def update_student_memory(
             )
 
             client = get_groq()
-            model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+            model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
             response = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],

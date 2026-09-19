@@ -87,10 +87,15 @@ class ChatRequest(BaseModel):
     )
     question: str
     subject: str = Field(default="Science", description="Subject name")
+    class_num: int | None = Field(
+        default=None,
+        description="Student's class (optional — resolved from DB if absent)."
+    )
     tutor_mode: str = Field(
         default="standard",
         description="'standard' = direct answer (default). 'deep' = Socratic diagnostic mode."
     )
+
 
 class SourceInfo(BaseModel):
     """Metadata about a curriculum source used in the answer."""

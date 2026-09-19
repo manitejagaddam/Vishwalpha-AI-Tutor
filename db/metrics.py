@@ -26,6 +26,62 @@ _ANALYTICAL_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 — Turn-level signal detectors (zero LLM, pure regex)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SELF_CORRECTION_PATTERN = re.compile(
+    r"\b(actually|wait|i mean|let me correct|i think i was wrong|no wait|"
+    r"correction|i made a mistake|scratch that)\b",
+    re.IGNORECASE
+)
+
+# Known misconception patterns (domain-specific)
+_MISCONCEPTION_PATTERNS = {
+    "heat_cold":         r"\b(cold is a thing|coldness enters|cold air flows)\b",
+    "evolution_goal":    r"\b(animals evolve to|species want to evolve)\b",
+    "current_direction": r"\b(current flows from negative|electrons are current)\b",
+    "force_needs_motion": r"\b(force is needed to keep|object needs force to stay moving)\b",
+    "photosynthesis_byproduct": r"\b(plants produce oxygen as waste|co2 is the product)\b",
+}
+
+
+def detect_answer_correctness(
+    student_response: str,
+    expected_keywords: list[str],
+) -> float:
+    """
+    Directly measures assessment_accuracy when the tutor asked a direct question.
+    Delegates to detect_understanding() for consistent scoring.
+    Returns 0.0-1.0.
+    """
+    from tutor.patterns import detect_understanding
+    return detect_understanding(student_response, expected_keywords)
+
+
+def detect_self_correction(
+    student_response: str,
+    prev_student_response: str | None,
+) -> bool:
+    """
+    Returns True if the student self-corrects a prior statement.
+    Signal used for struggle_recovery_rate.
+    """
+    if not prev_student_response:
+        return False
+    return bool(_SELF_CORRECTION_PATTERN.search(student_response))
+
+
+def detect_misconception(student_response: str) -> list[str]:
+    """
+    Returns a list of misconception pattern names detected in the student's response.
+    Used to populate confused_concepts in StudentTopicMastery.
+    """
+    return [
+        name for name, pat in _MISCONCEPTION_PATTERNS.items()
+        if re.search(pat, student_response, re.IGNORECASE)
+    ]
+
 BATCH_UPDATE_SYSTEM_PROMPT = """You are an expert educational analytics AI for an AI Tutor platform.
 You have observed a student over the last {n_turns} conversation turns and collected the following signals:
 
@@ -204,7 +260,7 @@ def batch_update_cognitive_profile(
 
     try:
         client = get_groq()
-        model = os.environ.get("GROQ_MIDDLEWARE_MODEL", "llama-3.1-8b-instant")
+        model = os.environ.get("GROQ_MIDDLEWARE_MODEL", "openai/gpt-oss-20b")
 
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],

@@ -58,29 +58,29 @@ def _retrieve_with_confidence(
     question: str,
     class_num: int = None,
     subject: str = None
-) -> tuple[str, list[SourceInfo], list[dict], dict | None]:
+) -> tuple[str, list[SourceInfo], list[dict], dict | None, "RetrievalEngine"]:
     """
     Retrieves pgvector chunks and filters out low-confidence results.
-    Returns: (context, sources, raw_chunks, route)
+    Phase 1 fix: class_num and subject are passed INTO route_query() as pre-filters
+    BEFORE cosine similarity sorting — not patched on after the fact.
+    Returns: (context, sources, raw_chunks, route, engine)
+    The engine is returned so callers can pass it to Socratic backtracking.
     """
     router = SemanticRouter()
-    route = router.route_query(question)
+    # Phase 1.6 fix: pass class_num + subject as pre-filters into the router
+    route = router.route_query(question, class_num=class_num, subject=subject)
+
+    engine = RetrievalEngine()
 
     if not route:
         logger.info("Classifier→curriculum, but router found no matching topic.")
-        return "", [], [], None
+        return "", [], [], None, engine
 
     logger.info(
         f"Routed → Class {route.get('class')} | {route.get('subject')} | "
         f"{route.get('chapter')} | {route.get('topic')}"
     )
 
-    engine = RetrievalEngine()
-    if class_num:
-        route["class"] = class_num
-    if subject:
-        route["subject"] = subject
-        
     raw_chunks = engine.retrieve(question, route, top_k=5)
 
     confident_chunks = [
@@ -94,7 +94,7 @@ def _retrieve_with_confidence(
             f"All chunks below confidence threshold ({RETRIEVAL_CONFIDENCE_THRESHOLD}). "
             f"Best score: {top_score:.3f}. Blocking LLM from answering."
         )
-        return "", [], raw_chunks, route
+        return "", [], raw_chunks, route, engine
 
     logger.info(
         f"Confidence gate: {len(confident_chunks)}/{len(raw_chunks)} chunks passed "
@@ -117,7 +117,7 @@ def _retrieve_with_confidence(
     reranker = Reranker()
     context = reranker.compress_context(confident_chunks)
 
-    return context, sources, raw_chunks, route
+    return context, sources, raw_chunks, route, engine
 
 def chat(request: ChatRequest) -> ChatResponse:
     """
@@ -132,8 +132,12 @@ def chat(request: ChatRequest) -> ChatResponse:
       6. Return ChatResponse
     """
     with managed_session() as db:
-        student = get_student(db, request.student_id)
-        class_num = student.class_num if student else 10
+        # Phase 1.5: honour class_num from request if provided, else resolve from DB
+        if request.class_num is not None:
+            class_num = request.class_num
+        else:
+            student = get_student(db, request.student_id)
+            class_num = student.class_num if student else 10  # default to Class 10
 
         session_id = get_or_create_session(
             student_id=request.student_id,
@@ -160,13 +164,39 @@ def chat(request: ChatRequest) -> ChatResponse:
         if diagnostic_state and diagnostic_state.get("phase") == "awaiting_response":
             logger.info("Deep mode Phase 2: evaluating diagnostic response.")
             socratic = _get_socratic()
+            # Pass a RetrievalEngine so Phase 2 can fetch lower-class backtrack content
+            _engine_for_backtrack = RetrievalEngine()
             answer = socratic.evaluate_and_explain(
                 student_response=request.question,
                 state=diagnostic_state,
                 metrics=metrics,
                 history=recent_history,
+                engine=_engine_for_backtrack,
             )
-            set_diagnostic_state(session_id, None)  # Clear state
+            # Check if backtracking happened — if so keep updated state alive
+            from tutor.patterns import detect_understanding, detect_give_up
+            _und = detect_understanding(request.question, diagnostic_state.get("expected_keywords", []))
+            _gave_up = detect_give_up(request.question)
+            _depth = diagnostic_state.get("backtrack_depth", 0)
+            _should_clear = (
+                _gave_up
+                or _und >= 0.50
+                or _depth >= 3
+                or not diagnostic_state.get("prereq_description")
+            )
+            if _should_clear:
+                set_diagnostic_state(session_id, None)  # Clear — session resolved
+            else:
+                # Update state for continued backtracking next turn
+                _new_state = {
+                    **diagnostic_state,
+                    "backtrack_depth": _depth + 1,
+                    "visited_topics": diagnostic_state.get("visited_topics", []) + [
+                        diagnostic_state.get("prereq_description", "")
+                    ],
+                    "phase": "awaiting_response",
+                }
+                set_diagnostic_state(session_id, _new_state)
             total_messages = save_turn(
                 session_id=session_id,
                 question=request.question,
@@ -226,7 +256,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         logger.info("Mode: conversational (no retrieval)")
     else:
         logger.info("Mode: curriculum (pgvector retrieval)")
-        context, sources, raw_chunks, route = _retrieve_with_confidence(
+        context, sources, raw_chunks, route, _ret_engine = _retrieve_with_confidence(
             request.question,
             class_num=class_num,
             subject=request.subject

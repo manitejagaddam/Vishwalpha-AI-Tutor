@@ -10,6 +10,7 @@ from routing.vector_store import RoutingVectorStore
 class SemanticRouter:
     """
     Handles routing user queries to the most relevant curriculum topic.
+    Accepts optional class_num and subject to scope routing before cosine sort.
     """
     def __init__(self):
         self.embedder = Embedder()
@@ -33,13 +34,26 @@ class SemanticRouter:
         
         self.vector_store.upsert_route(point_id, vector, payload)
 
-    def route_query(self, query: str) -> dict | None:
+    def route_query(
+        self,
+        query: str,
+        class_num: int | None = None,   # NEW: scope routing to student's class
+        subject: str | None = None,     # NEW: scope routing to student's subject
+    ) -> dict | None:
         """
         Takes a student query, embeds it, and finds the most relevant curriculum topic.
+        class_num and subject are passed down into the vector store as pre-filters BEFORE
+        cosine similarity sorting, preventing cross-class content leakage.
+
         Returns the metadata dictionary or None if no match is confident enough.
         """
         query_vector = self.embedder.embed_query(query)
-        results = self.vector_store.search_routes(query_vector, limit=1)
+        results = self.vector_store.search_routes(
+            query_vector,
+            limit=1,
+            class_num=class_num,   # PASS pre-filter down
+            subject=subject,       # PASS pre-filter down
+        )
         
         if results and results[0]["score"] > 0.4: 
             return results[0]["payload"]

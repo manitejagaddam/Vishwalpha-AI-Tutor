@@ -16,6 +16,42 @@ from schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5.1 — Token Budget
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TokenBudget:
+    """
+    Controls token allocation across prompt sections.
+    Prevents runaway token spend from unbounded context/memory injection.
+    """
+    MAX_SYSTEM   = 600    # fixed system prompt
+    MAX_CONTEXT  = 1200   # RAG curriculum content (~4800 chars)
+    MAX_HISTORY  = 400    # last ~4 messages verbatim
+    MAX_SUMMARY  = 200    # compressed session summary (~800 chars)
+    MAX_MEMORY   = 100    # topic-specific memories (~400 chars)
+    MAX_PERSONA  = 150    # personalization block (conditional)
+    TOTAL        = 2650   # target input budget
+
+    def should_include_personalization(self, metrics_changed: bool) -> bool:
+        """Only inject personalization block when cognitive metrics actually changed."""
+        return metrics_changed
+
+    def truncate_summary(self, summary: str) -> str:
+        """Keeps the most recent part of a summary (~200 tokens = 800 chars)."""
+        return summary[-800:] if len(summary) > 800 else summary
+
+    def truncate_context(self, context: str) -> str:
+        """Caps context at ~1200 tokens (4800 chars)."""
+        return context[:4800] if len(context) > 4800 else context
+
+    def truncate_memory(self, memory_text: str) -> str:
+        """Caps topic memory block at ~100 tokens (400 chars)."""
+        return memory_text[:400] if len(memory_text) > 400 else memory_text
+
+
+_token_budget = TokenBudget()
+
 CURRICULUM_SYSTEM_PROMPT = """You are VishwAlpha, a personalised AI tutor for Indian school students studying NCERT curriculum.
 
 TEACHING STYLES (adapt to what the student needs):
@@ -107,7 +143,7 @@ class TutorLLM:
     """
     def __init__(self):
         self.client = get_groq()
-        self.model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
     def generate(
         self,
@@ -134,8 +170,19 @@ class TutorLLM:
             class_num, subject, metrics, cognitive_skills, student_memory
         )
 
+        # Phase 5.4: lightweight prompt metadata log (not full prompt)
         from db.memory import log_llm_prompt
-        log_llm_prompt(student_id, session_id, messages)
+        log_llm_prompt(
+            student_id, session_id,
+            {
+                "question_type": question_type,
+                "class_num": class_num,
+                "subject": subject,
+                "context_chars": len(context),
+                "history_turns": len(history) if history else 0,
+                "cache_hit": False,  # engine already logged cache hit upstream
+            },
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -171,6 +218,7 @@ class TutorLLM:
     ) -> list[dict]:
         """
         Builds the Groq messages array based on question type.
+        Applies Phase 5.1 token budget truncations to context and session summary.
         """
         msgs: list[dict] = []
 
@@ -187,11 +235,13 @@ class TutorLLM:
             msgs.append({"role": "system", "content": pers_prompt})
 
         if question_type == "curriculum" and context:
+            # Phase 5.1: truncate context to MAX_CONTEXT token budget (~4800 chars)
+            truncated_ctx = _token_budget.truncate_context(context)
             msgs.append({
                 "role": "system",
                 "content": (
                     "━━━━━━━━ TEXTBOOK CONTEXT (your ONLY source of facts) ━━━━━━━━\n\n"
-                    f"{context}\n\n"
+                    f"{truncated_ctx}\n\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 ),
             })
@@ -207,11 +257,13 @@ class TutorLLM:
             })
 
         if memory_summary:
+            # Phase 5.1: truncate session summary to MAX_SUMMARY budget
+            truncated_sum = _token_budget.truncate_summary(memory_summary)
             msgs.append({
                 "role": "system",
                 "content": (
                     "EARLIER CONVERSATION SUMMARY:\n"
-                    f"{memory_summary}"
+                    f"{truncated_sum}"
                 ),
             })
 
