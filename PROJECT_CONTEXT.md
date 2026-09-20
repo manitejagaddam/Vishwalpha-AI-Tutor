@@ -73,7 +73,9 @@ VishwAlpha is a premium, AI-powered personalised tutoring system for the Indian 
 - **`app/services/ingestion_pipeline.py`**: Fully rewritten for Phase 2 schema. Creates `Board → SchoolClass → Subject → Book → Chapter → Topic → ContentBlock → BlockEmbedding` rows correctly.
 - **`scripts/ingest.py`**: Updated CLI with new `--board`, `--book-title`, `--book-key`, `--chapter-num` args.
 - **`app/api/sessions.py`**: Added `PATCH /sessions/{id}/title` and `POST /sessions/{id}/generate-title` (Claude-style smart heading).
-- **`app/services/tutor_llm.py`**: Improved `generate_chat_title` prompt for Claude-style headings.
+- **`app/services/tutor_llm.py`**: Implemented `generate_chat_title` prompt for Claude-style headings.
+- **`Artifacts/database_schema_guide.md`**: Documented all 22+ tables, foreign keys, and relationships.
+- Ingestion verified on `chapter_10.pdf` via `python -m scripts.ingest`.
 
 ### Schema Rule (Golden)
 `Chapter` has: `book_id`, `title`, `chapter_number`, `natural_key` — **NO `subject_id`, NO `class_num`**.
@@ -82,7 +84,7 @@ Always traverse: `Chapter → Book → Subject → SchoolClass` for subject/clas
 ### All imports verified clean (2026-09-21):
 `app.main`, `app.api.*`, `app.data.*`, `app.services.*`, `app.infra.*` — all import without errors.
 
-### Next Step: Phase 8 (End-to-End Testing)
-- Validate full UI workflows: chat streaming, quiz generation/finish, sessions list.
-- Ingest a sample PDF using `python -m scripts.ingest` to test the new ingestion pipeline.
-- Verify cognitive metrics update correctly after quiz completion.
+### Next Step: Automated Test Suite (Database & Schema Protection)
+- Set up dedicated PostgreSQL test environment supporting `pgvector`.
+- Implement `pytest` test suite (`test_schema_integrity.py`, `test_curriculum_repo.py`, `test_cognitive_repo.py`, `test_chat_orchestrator.py`).
+
