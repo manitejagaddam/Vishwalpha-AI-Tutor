@@ -1,49 +1,50 @@
 """
 app/infra/embedder.py
 ─────────────────────
-Sentence-transformer embedding model — loaded exactly once per process.
-Uses functools.lru_cache so the model survives across requests without
-being reloaded, even if the Embedder class is re-instantiated.
+Azure OpenAI embedding client — replaces the sentence-transformers local model.
+Uses `viswalpha-text-embedding-3-small` via the Azure Foundry OpenAI-compatible
+v1 endpoint. Caches embeddings through Redis (handled by RetrievalCache) so the
+10k TPM quota is not exhausted on repeated identical queries.
+
+Dimension: 1536 (default for text-embedding-3-small).
 """
-import warnings
 import logging
-import functools
-
-warnings.filterwarnings("ignore", message=".*Accessing `__path__`.*")
-
-from sentence_transformers import SentenceTransformer
+from app.infra.azure_openai_client import get_openai
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-@functools.lru_cache(maxsize=1)
-def _load_model(model_name: str, token: str) -> SentenceTransformer:
-    """Loads and caches the SentenceTransformer model globally."""
-    logger.info(f"Loading embedding model: {model_name} (one-time)")
-    return SentenceTransformer(model_name, token=token or None)
-
-
 class Embedder:
     """
-    Thin wrapper around the globally-cached SentenceTransformer model.
-    Thread-safe: lru_cache is process-level, not instance-level.
+    Thin wrapper around the Azure OpenAI embeddings API.
+    Thread-safe: the underlying OpenAI client is a module-level singleton.
     """
 
-    def __init__(self, model_name: str = None):
-        model_name = model_name or settings.EMBEDDING_MODEL
-        self.model = _load_model(model_name, settings.HF_TOKEN)
+    def __init__(self, model: str | None = None):
+        self.model = model or settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+        self.dimensions = settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS
+        self.client = get_openai()
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        """Calls the Azure embedding API and returns a list of float vectors."""
+        response = self.client.embeddings.create(
+            model=self.model,
+            input=texts,
+            dimensions=self.dimensions,
+            encoding_format="float",
+        )
+        # response.data is sorted by index
+        return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
 
     def embed_document(self, text: str) -> list[float]:
-        """Embeds a document chunk for storage/retrieval."""
-        return self.model.encode(text, normalize_embeddings=True).tolist()
+        """Embeds a single document chunk for storage/retrieval."""
+        return self._embed([text])[0]
 
     def embed_query(self, query: str) -> list[float]:
         """
-        Embeds a search query. BGE models benefit from an instruction prefix
-        to improve retrieval quality.
+        Embeds a search query.
+        text-embedding-3-small does not need an instruction prefix —
+        unlike BGE models, it handles asymmetric retrieval natively.
         """
-        instruction = "Represent this sentence for searching relevant passages: "
-        return self.model.encode(
-            instruction + query, normalize_embeddings=True
-        ).tolist()
+        return self._embed([query])[0]

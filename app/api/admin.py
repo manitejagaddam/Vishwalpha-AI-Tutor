@@ -4,26 +4,14 @@ app/api/admin.py
 Admin routes (e.g. data ingestion).
 Protected by a static ADMIN_API_KEY from environment variables.
 """
-from fastapi import APIRouter, HTTPException, Depends, Security
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, HTTPException, Depends
 
 from app.config import settings
 from app.schemas import IngestRequest, IngestResponse
 from app.services.ingestion_pipeline import IngestionPipeline
+from app.api.deps import verify_admin_key
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
-api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
-
-
-def verify_admin_key(api_key: str = Security(api_key_header)):
-    if not settings.ADMIN_API_KEY:
-        # If no key is configured in .env, lock the endpoint entirely
-        raise HTTPException(
-            status_code=403, detail="Admin API key not configured on server."
-        )
-    if api_key != settings.ADMIN_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid Admin API Key")
-    return api_key
 
 
 @router.post("/ingest", response_model=IngestResponse)

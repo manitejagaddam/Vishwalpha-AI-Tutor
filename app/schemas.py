@@ -4,16 +4,16 @@ app/schemas.py
 All Pydantic request/response schemas for the API.
 """
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    username:  str
-    email:     str
-    password:  str
-    class_num: int
+    username:  str = Field(min_length=3, max_length=50)
+    email:     str = Field(max_length=200)
+    password:  str = Field(min_length=6, max_length=128)
+    class_num: int = Field(ge=6, le=12)
 
 
 class LoginRequest(BaseModel):
@@ -22,10 +22,12 @@ class LoginRequest(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    student_id: str
-    username:   str
-    class_num:  int
-    message:    str = ""
+    student_id:   str
+    username:     str
+    class_num:    int
+    access_token: str = ""          # JWT bearer token
+    token_type:   str = "bearer"
+    message:      str = ""
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
@@ -56,15 +58,28 @@ class YesterdayContext(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    student_id: str    = Field(description="Authenticated student UUID")
     session_id: str    = Field(default="", description="Leave empty to start a new session")
-    question:   str
+    question:   str    = Field(min_length=1, max_length=4000, description="The student's question")
     subject:    str    = Field(default="Science")
-    class_num:  Optional[int] = Field(default=None, description="Resolved from DB if absent")
+    class_num:  Optional[int] = Field(default=None, description="Resolved from JWT if absent")
     tutor_mode: str    = Field(
         default="standard",
         description="'standard' = direct answer | 'deep' = Socratic diagnostic"
     )
+
+    @field_validator("question")
+    @classmethod
+    def question_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Question cannot be blank.")
+        return v.strip()
+
+    @field_validator("tutor_mode")
+    @classmethod
+    def valid_tutor_mode(cls, v: str) -> str:
+        if v not in ("standard", "deep"):
+            raise ValueError("tutor_mode must be 'standard' or 'deep'.")
+        return v
 
 
 class ChatResponse(BaseModel):
@@ -97,7 +112,7 @@ class UpdateMetricsRequest(BaseModel):
 
 class IngestRequest(BaseModel):
     pdf_path:  str = Field(description="Path to PDF relative to the server's DataSet/ directory")
-    class_num: int
+    class_num: int = Field(ge=6, le=12)
     subject:   str
     chapter:   str
 
@@ -134,7 +149,6 @@ class CanonicalCurriculum(BaseModel):
 # ── Quiz / Assignment Schemas ─────────────────────────────────────────────────
 
 class GenerateQuizRequest(BaseModel):
-    student_id:    str
     subject:       str
     topic:         str
     session_id:    str = ""

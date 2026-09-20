@@ -11,7 +11,8 @@ import json
 import logging
 from PyPDF2 import PdfReader
 
-from app.infra.groq_client import get_groq
+from app.infra.azure_openai_client import get_openai
+from app.config import settings
 from app.infra.vector_router import VectorRouter
 from app.services.retrieval_service import upsert_chunk
 from app.schemas import CanonicalCurriculum, ProcessedSection
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class IngestionPipeline:
     def __init__(self):
-        self.llm = get_groq()
+        self.llm = get_openai()
         self.router = VectorRouter()
 
     def process_pdf(
@@ -134,9 +135,9 @@ Raw text to process:
         try:
             response = self.llm.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.1-8b-instant",  # using instant for fast structuring
+                model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
                 temperature=0.1,
-                max_tokens=4000,
+                max_completion_tokens=4000,
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content.strip()

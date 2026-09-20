@@ -1,14 +1,26 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { useSession } from '../context/SessionContext';
 import Sidebar from '../components/Sidebar/Sidebar';
 import ChatArea from '../components/Chat/ChatArea';
 import ContextPanel from '../components/ContextPanel/ContextPanel';
 
-
-
 export default function ChatPage() {
-  const { showContext } = useSession();
+  const { showContext, subject, sessionId } = useSession();
+
+  // Lifted quiz state — shared between Sidebar button and ChatArea
+  const [activeQuiz, setActiveQuiz] = useState(null);
+
+  const handleStartQuiz = ({ topic, subject: sub }) => {
+    setActiveQuiz({
+      topic: topic || '',
+      subject: sub || subject,
+      source: topic ? 'mid_concept' : 'manual',
+      sessionId: sessionId || '',
+    });
+  };
+
+  const handleQuizClose = () => setActiveQuiz(null);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-transparent">
@@ -16,7 +28,7 @@ export default function ChatPage() {
         
         {/* Left Sidebar Panel */}
         <Panel defaultSize={20} minSize={15} maxSize={300}>
-          <Sidebar />
+          <Sidebar onStartQuiz={handleStartQuiz} />
         </Panel>
 
         <PanelResizeHandle className="w-1.5 bg-black/20 hover:bg-indigo-500/50 transition-colors duration-200 cursor-col-resize flex flex-col justify-center items-center group relative z-10">
@@ -25,7 +37,11 @@ export default function ChatPage() {
 
         {/* Center Chat Panel */}
         <Panel minSize={30}>
-          <ChatArea />
+          <ChatArea
+            activeQuiz={activeQuiz}
+            onStartQuiz={handleStartQuiz}
+            onQuizClose={handleQuizClose}
+          />
         </Panel>
 
         {/* Right Context Panel (Conditionally rendered) */}

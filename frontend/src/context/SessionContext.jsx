@@ -23,7 +23,7 @@ export const SessionProvider = ({ children }) => {
   const refreshProfile = useCallback(async () => {
     if (!student) return;
     try {
-      const data = await studentApi.getProfile(student.student_id, subject);
+      const data = await studentApi.getProfile(subject);
       setMetrics(data.metrics);
       setCognitiveSkills(data.cognitive_skills);
     } catch (e) {
@@ -34,7 +34,7 @@ export const SessionProvider = ({ children }) => {
   const refreshSessions = useCallback(async () => {
     if (!student) return;
     try {
-      const sess = await studentApi.getSessions(student.student_id, subject);
+      const sess = await studentApi.getSessions(subject);
       setSessions(sess);
     } catch (e) {
       console.error(e);
@@ -44,7 +44,7 @@ export const SessionProvider = ({ children }) => {
   const refreshMemory = useCallback(async () => {
     if (!student) return;
     try {
-      const mem = await studentApi.getMemory(student.student_id, subject);
+      const mem = await studentApi.getMemory(subject);
       setMemory(mem);
     } catch (e) {
       console.error(e);

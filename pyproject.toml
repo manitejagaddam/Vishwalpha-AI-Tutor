@@ -1,12 +1,13 @@
 [project]
 name = "ai-tutor"
 version = "0.1.0"
-description = "A personalised AI Tutor with adaptive learning, AI-powered doubt clearing, and smart summarization of textbooks. It uses Groq LLM as the brain for the tutor."
+description = "A personalised AI Tutor with adaptive learning, AI-powered doubt clearing, and smart summarization of textbooks. Uses Azure OpenAI (GPT-4.1-mini + text-embedding-3-small) hosted on viswalpha-foundry-50bd."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "cachetools>=5.0",
     "fastapi>=0.136.1",
-    "groq>=1.2.0",
+    "openai>=1.57.0",
     "paddleocr>=3.5.0",
     "paddlepaddle>=3.3.1",
     "pdfminer-six>=20260107",
@@ -18,13 +19,15 @@ dependencies = [
     "pymupdf>=1.27.2.3",
     "pypdf2>=3.0.1",
     "python-dotenv>=1.2.2",
+    "python-jose[cryptography]>=3.5.0",
     "qdrant-client>=1.18.0",
     "redis>=7.4.0",
-    "sentence-transformers>=5.4.1",
     "slowapi>=0.1.10",
     "sqlalchemy>=2.0.49",
+    "sse-starlette>=2.1",
     "streamlit>=1.45.0",
     "torchvision>=0.27.1",
+    "unicorn>=2.1.4",
     "unstructured>=0.18.32",
     "unstructured-client>=0.42.12",
     "uvicorn>=0.46.0",

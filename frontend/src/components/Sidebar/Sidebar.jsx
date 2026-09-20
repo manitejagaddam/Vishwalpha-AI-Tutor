@@ -1,9 +1,25 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
-import { LogOut, BrainCircuit, Activity, BookOpen, Clock } from 'lucide-react';
+import { LogOut, BrainCircuit, Activity, Clock, Zap, BookOpen } from 'lucide-react';
 
-export default function Sidebar() {
+/** Returns a human-readable session title from DB metadata */
+function sessionTitle(s) {
+  if (s.chat_title) return s.chat_title;
+  if (s.last_topic_name) return s.last_topic_name;
+  if (s.first_message_snippet) {
+    return s.first_message_snippet.charAt(0).toUpperCase() + s.first_message_snippet.slice(1);
+  }
+  const date = new Date(s.created_at);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return 'New Chat';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday\'s Chat';
+  return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) + ' Chat';
+}
+
+export default function Sidebar({ onStartQuiz }) {
   const { student, logout } = useAuth();
   const { 
     subject, setSubject, 
@@ -64,6 +80,15 @@ export default function Sidebar() {
               <option value="deep">🧠 Deep Socratic</option>
             </select>
           </div>
+
+          {/* Quick Quiz button */}
+          <button
+            onClick={() => onStartQuiz && onStartQuiz({ topic: '', subject })}
+            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600/30 to-purple-600/30 border border-violet-500/40 text-violet-300 text-sm font-bold hover:from-violet-600/60 hover:to-purple-600/60 hover:text-white transition-all shadow-[0_0_20px_rgba(139,92,246,0.15)] hover:shadow-[0_0_20px_rgba(139,92,246,0.35)] group"
+          >
+            <Zap size={15} className="group-hover:text-yellow-300 transition-colors" />
+            Take a Quiz
+          </button>
         </div>
 
         {/* Sessions */}
@@ -81,14 +106,20 @@ export default function Sidebar() {
               <button
                 key={s.id}
                 onClick={() => loadSession(s.id)}
-                className={`w-full text-left p-3 rounded-xl text-sm truncate transition-all flex items-center justify-between border ${
+                className={`w-full text-left p-3 rounded-xl text-sm transition-all flex flex-col gap-0.5 border ${
                   s.id === sessionId 
                     ? 'bg-gradient-to-r from-indigo-600/30 to-purple-600/10 border-indigo-500/50 text-white shadow-[inset_0_0_10px_rgba(99,102,241,0.2)]' 
                     : 'bg-black/20 border-transparent text-gray-400 hover:bg-white/5 hover:border-white/10 hover:text-gray-200'
                 }`}
               >
-                <span>{new Date(s.created_at).toLocaleDateString()}</span>
-                <span className="text-[10px] opacity-60 bg-black/30 px-2 py-0.5 rounded">{s.subject}</span>
+                {/* Smart title: topic name if available, else friendly date */}
+                <span className="font-medium truncate leading-tight">{sessionTitle(s)}</span>
+                {/* Subtitle: date + message count */}
+                <span className="text-[10px] opacity-50 flex items-center gap-1.5">
+                  <Clock size={9} />
+                  {new Date(s.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                  {s.message_count > 0 && <span>· {s.message_count} msgs</span>}
+                </span>
               </button>
             ))}
             {sessions.length === 0 && <div className="text-xs text-gray-500 italic p-2 bg-black/20 rounded-lg text-center">No past sessions</div>}

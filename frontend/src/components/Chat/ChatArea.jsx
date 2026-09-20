@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
-import { chatApi } from '../../api/client';
+import { chatApi, quizApi } from '../../api/client';
 import { Send, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -10,7 +10,7 @@ import QuizCard from '../Quiz/QuizCard';
 import QuizSuggestionCard from '../Quiz/QuizSuggestionCard';
 import YesterdayContextBanner from '../Quiz/YesterdayContextBanner';
 
-export default function ChatArea() {
+export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
   const { student } = useAuth();
   const {
     sessionId, setSessionId,
@@ -25,16 +25,11 @@ export default function ChatArea() {
   const scrollRef = useRef(null);
 
   // ── Quiz state ──────────────────────────────────────────────────────────────
-  // yesterdayCtx: { subject, topic, session_date } | null
   const [yesterdayCtx, setYesterdayCtx] = useState(null);
   const [yesterdayBannerDismissed, setYesterdayBannerDismissed] = useState(false);
 
-  // activeQuiz: { topic, subject, source, sessionId } | null — triggers QuizCard overlay
-  const [activeQuiz, setActiveQuiz] = useState(null);
-
   // Per-message quiz suggestions: { [msgIndex]: { topic, subject, numQuestions } }
   const [quizSuggestions, setQuizSuggestions] = useState({});
-  // Set of message indices where quiz suggestion has been accepted/skipped
   const [dismissedSuggestions, setDismissedSuggestions] = useState(new Set());
 
   // Auto-scroll on new messages
@@ -48,6 +43,23 @@ export default function ChatArea() {
   // (The backend sends it in is_session_start=true responses)
   const yesterdayCtxSetRef = useRef(false);
 
+  // ── Fetch yesterday context on mount so banner shows without needing a first message ──
+  useEffect(() => {
+    if (!student?.student_id) return;
+    yesterdayCtxSetRef.current = false;
+    setYesterdayCtx(null);
+    setYesterdayBannerDismissed(false);
+
+    quizApi.getYesterdayContext(student.student_id)
+      .then(data => {
+        if (data?.topic) {
+          setYesterdayCtx(data);
+          yesterdayCtxSetRef.current = true;
+        }
+      })
+      .catch(() => {}); // silently ignore if endpoint not available
+  }, [student?.student_id, subject]);
+
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -58,62 +70,97 @@ export default function ChatArea() {
     // Optimistic append
     const newMsg = { role: 'student', content: questionText };
     setMessages(prev => [...prev, newMsg]);
+    
+    // Add empty tutor message to stream into
+    setMessages(prev => [...prev, {
+      role: 'tutor',
+      content: '',
+      sources: [],
+      isStreaming: true
+    }]);
+    
     setIsThinking(true);
 
     try {
-      const response = await chatApi.sendMessage({
-        student_id: student.student_id,
-        session_id: sessionId,
-        question: questionText,
-        subject: subject,
-        tutor_mode: tutorMode
-      });
+      await chatApi.sendMessageStream(
+        {
+          session_id: sessionId,
+          question: questionText,
+          subject: subject,
+          tutor_mode: tutorMode
+        },
+        // onChunk
+        (token, meta) => {
+          if (meta) {
+            if (!sessionId && meta.session_id) {
+              setSessionId(meta.session_id);
+              refreshSessions();
+            }
+            if (meta.is_session_start && meta.yesterday_context && !yesterdayCtxSetRef.current) {
+              setYesterdayCtx(meta.yesterday_context);
+              yesterdayCtxSetRef.current = true;
+            }
+          }
+          if (token) {
+            setIsThinking(false); // Stop bounce animation once tokens start
+            setMessages(prev => {
+              const newMsgs = [...prev];
+              const last = { ...newMsgs[newMsgs.length - 1] };
+              last.content += token;
+              newMsgs[newMsgs.length - 1] = last;
+              return newMsgs;
+            });
+          }
+        },
+        // onDone
+        (data) => {
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const last = { ...newMsgs[newMsgs.length - 1] };
+            last.isStreaming = false;
+            last.sources = data.sources || [];
+            last.chapter = data.routed_chapter;
+            last.topic = data.routed_topic;
+            last.question_type = data.question_type;
+            last.quiz_suggestion = data.quiz_suggestion || null;
+            newMsgs[newMsgs.length - 1] = last;
+            
+            if (data.quiz_suggestion) {
+              setQuizSuggestions(old => ({ ...old, [newMsgs.length - 1]: data.quiz_suggestion }));
+            }
+            return newMsgs;
+          });
 
-      if (!sessionId && response.session_id) {
-        setSessionId(response.session_id);
-        refreshSessions();
-      }
+          if (data.metrics_adjustments) {
+            setMetricsAdjustments(data.metrics_adjustments);
+          }
 
-      // Pick up yesterday context on new session (first response)
-      if (response.is_session_start && response.yesterday_context && !yesterdayCtxSetRef.current) {
-        setYesterdayCtx(response.yesterday_context);
-        yesterdayCtxSetRef.current = true;
-      }
-
-      const tutorMsg = {
-        role: 'tutor',
-        content: response.answer,
-        sources: response.sources,
-        chapter: response.routed_chapter,
-        topic: response.routed_topic,
-        question_type: response.question_type,
-        chunks: response.raw_chunks,
-        prompt_messages: response.prompt_messages,
-        quiz_suggestion: response.quiz_suggestion || null,
-      };
-
-      setMessages(prev => {
-        const updated = [...prev, tutorMsg];
-        // Store quiz suggestion keyed by message index
-        if (response.quiz_suggestion) {
-          setQuizSuggestions(old => ({ ...old, [updated.length - 1]: response.quiz_suggestion }));
+          refreshProfile();
+          refreshMemory();
+          setIsThinking(false);
+        },
+        // onError
+        (e) => {
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const last = { ...newMsgs[newMsgs.length - 1] };
+            last.isStreaming = false;
+            last.content += `\n\n⚠️ Error: ${e.message}`;
+            newMsgs[newMsgs.length - 1] = last;
+            return newMsgs;
+          });
+          setIsThinking(false);
         }
-        return updated;
-      });
-
-      if (response.metrics_adjustments) {
-        setMetricsAdjustments(response.metrics_adjustments);
-      }
-
-      refreshProfile();
-      refreshMemory();
-
+      );
     } catch (e) {
-      setMessages(prev => [...prev, {
-        role: 'tutor',
-        content: `⚠️ Error: ${e.response?.data?.detail || e.message}`
-      }]);
-    } finally {
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        const last = { ...newMsgs[newMsgs.length - 1] };
+        last.isStreaming = false;
+        last.content += `\n\n⚠️ Catch Error: ${e.message}`;
+        newMsgs[newMsgs.length - 1] = last;
+        return newMsgs;
+      });
       setIsThinking(false);
     }
   };
@@ -121,13 +168,10 @@ export default function ChatArea() {
   // ── Quiz handlers ──────────────────────────────────────────────────────────
 
   const startQuiz = ({ topic, subject: sub, source = 'manual' }) => {
-    setActiveQuiz({
-      topic,
-      subject: sub || subject,
-      source,
-      sessionId: sessionId || '',
-    });
     setYesterdayBannerDismissed(true);
+    if (onStartQuiz) {
+      onStartQuiz({ topic, subject: sub || subject, source });
+    }
   };
 
   const handleQuizSuggestionAccept = (msgIndex) => {
@@ -147,7 +191,7 @@ export default function ChatArea() {
   };
 
   const handleQuizClose = () => {
-    setActiveQuiz(null);
+    if (onQuizClose) onQuizClose();
     refreshProfile();
     refreshMemory();
   };

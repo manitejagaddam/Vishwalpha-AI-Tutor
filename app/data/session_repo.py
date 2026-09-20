@@ -18,6 +18,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import func as sqla_func
+
 from app.data.database import managed_session
 from app.data.models import (
     ConversationSession,
@@ -27,7 +29,8 @@ from app.data.models import (
     DiagnosticState,
     PromptLog,
 )
-from app.infra.groq_client import get_groq
+from app.infra.azure_openai_client import get_openai
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +158,8 @@ def save_turn(
 def get_history(session_id: str) -> tuple[str, list]:
     """
     Returns (memory_summary, recent_messages).
-    recent_messages = last 4 messages (2 turns) verbatim.
+    recent_messages = last 4 messages (2 turns) verbatim — used as LLM context.
+    For the full display history (all messages), use get_full_history().
     """
     from app.schemas import ChatMessage
 
@@ -177,6 +181,24 @@ def get_history(session_id: str) -> tuple[str, list]:
     return memory_summary, recent
 
 
+def get_full_history(session_id: str) -> list:
+    """
+    Returns ALL messages in a session — used by the session detail API
+    so the frontend can display the complete conversation on load.
+    Unlike get_history(), this is not limited to 4 messages.
+    """
+    from app.schemas import ChatMessage
+
+    with managed_session() as db:
+        messages = (
+            db.query(ConversationMessage)
+            .filter(ConversationMessage.session_id == session_id)
+            .order_by(ConversationMessage.created_at.asc())
+            .all()
+        )
+        return [ChatMessage(role=m.role, content=m.content) for m in messages]
+
+
 def get_session_message_count(session_id: str) -> int:
     with managed_session() as db:
         return db.query(ConversationMessage).filter(
@@ -185,31 +207,51 @@ def get_session_message_count(session_id: str) -> int:
 
 
 def get_student_sessions(student_id: str, subject: str) -> list[dict]:
+    """
+    Returns all sessions for a student, most recent first.
+    Uses a single GROUP BY query for message counts (eliminates N+1).
+    """
     with managed_session() as db:
-        sessions = (
-            db.query(ConversationSession)
+        # Single query: sessions + message counts via LEFT JOIN + GROUP BY
+        rows = (
+            db.query(
+                ConversationSession,
+                sqla_func.count(ConversationMessage.id).label("message_count"),
+            )
+            .outerjoin(
+                ConversationMessage,
+                ConversationMessage.session_id == ConversationSession.id,
+            )
             .filter(
                 ConversationSession.student_id == student_id,
                 ConversationSession.subject == subject,
             )
+            .group_by(ConversationSession.id)
             .order_by(ConversationSession.updated_at.desc())
             .limit(50)
             .all()
         )
-        result = []
-        for s in sessions:
-            count = db.query(ConversationMessage).filter(
-                ConversationMessage.session_id == s.id
-            ).count()
-            result.append({
+        return [
+            {
                 "id": s.id,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "updated_at": s.updated_at.isoformat() if s.updated_at else None,
                 "message_count": count,
                 "session_mood": s.session_mood,
                 "session_duration_sec": s.session_duration_sec,
-            })
-        return result
+                "last_topic_name": s.last_topic_name,
+                "chat_title": s.chat_title,
+                "subject": s.subject,
+            }
+            for s, count in rows
+        ]
+
+def update_session_title(session_id: str, title: str):
+    with managed_session() as db:
+        session = db.query(ConversationSession).filter(ConversationSession.id == session_id).first()
+        if session:
+            session.chat_title = title
+            db.commit()
 
 
 def get_session_remark(session_id: str) -> str:
@@ -286,7 +328,7 @@ def update_student_memory(
     existing_str = "\n".join(f"- {m}" for m in existing) if existing else "(none yet)"
 
     try:
-        client = get_groq()
+        client = get_openai()
         resp = client.chat.completions.create(
             messages=[{
                 "role": "user",
@@ -296,9 +338,9 @@ def update_student_memory(
                     context=context[:500],
                 ),
             }],
-            model="llama-3.1-8b-instant",
+            model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.2,
-            max_tokens=300,
+            max_completion_tokens=300,
         )
         raw = resp.choices[0].message.content.strip()
         # Extract JSON array
@@ -367,7 +409,7 @@ def get_student_tasks(student_id: str, subject: str) -> list[str]:
 # ── Prompt log cleanup ────────────────────────────────────────────────────────
 
 def cleanup_old_prompt_logs(days: int = 5) -> int:
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     with managed_session() as db:
         deleted = db.query(PromptLog).filter(PromptLog.created_at < cutoff).delete()
         logger.info(f"Cleaned up {deleted} prompt logs older than {days} days.")

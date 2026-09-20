@@ -1,12 +1,26 @@
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
 const client = axios.create({
   baseURL: API_BASE,
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// Interceptor to attach JWT token
+client.interceptors.request.use((config) => {
+  const saved = localStorage.getItem('vishwalpha_student');
+  if (saved) {
+    const data = JSON.parse(saved);
+    if (data.access_token) {
+      config.headers.Authorization = `Bearer ${data.access_token}`;
+    }
+  }
+  return config;
+}, (error) => {
+  return Promise.reject(error);
 });
 
 export const authApi = {
@@ -21,10 +35,81 @@ export const authApi = {
 };
 
 export const chatApi = {
+  // Legacy non-streaming call (if still needed)
   sendMessage: async (data) => {
     const res = await client.post('/chat', data);
     return res.data;
   },
+  
+  // New SSE streaming call
+  sendMessageStream: async (data, onChunk, onDone, onError) => {
+    let token = '';
+    const saved = localStorage.getItem('vishwalpha_student');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed.access_token) token = parsed.access_token;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) {
+        let errorDetail = 'Network response was not ok';
+        try {
+          const errBody = await response.json();
+          if (errBody.detail) errorDetail = errBody.detail;
+        } catch (e) {}
+        throw new Error(errorDetail);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep the last incomplete line in the buffer
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            if (!dataStr) continue;
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.type === 'token') {
+                onChunk(parsed.content);
+              } else if (parsed.type === 'done') {
+                onDone(parsed);
+              } else if (parsed.type === 'error') {
+                onError(new Error(parsed.detail));
+              } else if (parsed.type === 'meta') {
+                // If we want to capture meta (like session_id early), we can pass it via onChunk or a new callback
+                // Re-using onChunk with a special flag is an option, but let's just pass it back for completeness
+                onChunk('', parsed);
+              }
+            } catch (err) {
+              console.warn('Failed to parse SSE JSON:', dataStr, err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      onError(err);
+    }
+  },
+  
   getHistory: async (sessionId) => {
     const res = await client.get(`/history/${sessionId}`);
     return res.data;
@@ -32,16 +117,16 @@ export const chatApi = {
 };
 
 export const studentApi = {
-  getSessions: async (studentId, subject = "Science") => {
-    const res = await client.get('/sessions', { params: { student_id: studentId, subject } });
+  getSessions: async (subject = "Science") => {
+    const res = await client.get('/sessions', { params: { subject } });
     return res.data.sessions;
   },
-  getMemory: async (studentId, subject = "Science") => {
-    const res = await client.get('/student/memory', { params: { student_id: studentId, subject } });
+  getMemory: async (subject = "Science") => {
+    const res = await client.get('/student/memory', { params: { subject } });
     return res.data.memory;
   },
-  getProfile: async (studentId, subject = "Science") => {
-    const res = await client.get('/student/profile', { params: { student_id: studentId, subject } });
+  getProfile: async (subject = "Science") => {
+    const res = await client.get('/student/profile', { params: { subject } });
     return res.data;
   },
   getSessionRemark: async (sessionId) => {
@@ -71,20 +156,20 @@ export const quizApi = {
     return res.data;
   },
   /** Yesterday context for session-start banner */
-  getYesterdayContext: async (student_id) => {
-    const res = await client.get('/quiz/yesterday', { params: { student_id } });
+  getYesterdayContext: async () => {
+    const res = await client.get('/quiz/yesterday');
     return res.data;
   },
   /** Past quiz attempt history */
-  getHistory: async (student_id, subject = null) => {
-    const params = { student_id };
+  getHistory: async (subject = null) => {
+    const params = {};
     if (subject) params.subject = subject;
     const res = await client.get('/quiz/history', { params });
     return res.data.attempts;
   },
   /** Subject-level quiz feedback */
-  getFeedback: async (student_id, subject) => {
-    const res = await client.get(`/quiz/feedback/${subject}`, { params: { student_id } });
+  getFeedback: async (subject) => {
+    const res = await client.get(`/quiz/feedback/${subject}`);
     return res.data;
   },
 };

@@ -2,6 +2,7 @@
 app/config.py
 ─────────────
 Single source of truth for all environment configuration.
+Migrated from Groq + sentence-transformers → Azure OpenAI (viswalpha-foundry-50bd).
 Uses pydantic-settings so values are type-validated at startup.
 All other modules import `settings` from here instead of calling os.getenv().
 """
@@ -20,13 +21,12 @@ class Settings(BaseSettings):
     # ── Database ────────────────────────────────────────────────────────
     DATABASE_URL: str
 
-    # ── AI / LLM ────────────────────────────────────────────────────────
-    GROQ_API_KEY: str
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    HF_TOKEN: str = ""
-
-    # ── Embedding ───────────────────────────────────────────────────────
-    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    # ── Azure OpenAI (viswalpha-foundry-50bd) ──────────────────────────
+    AZURE_OPENAI_API_KEY: str
+    AZURE_OPENAI_BASE_URL: str = "https://viswalpha-foundry-50bd.openai.azure.com/openai/v1/"
+    AZURE_OPENAI_CHAT_DEPLOYMENT: str = "viswalpha-gpt-4.1-mini"
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "viswalpha-text-embedding-3-small"
+    AZURE_OPENAI_EMBEDDING_DIMENSIONS: int = 1536
 
     # ── Redis Cache ─────────────────────────────────────────────────────
     REDIS_URL: str = ""
@@ -46,12 +46,23 @@ class Settings(BaseSettings):
     RATE_LIMIT_READ: str = "120/minute"
     RATE_LIMIT_AUTH: str = "10/minute"
 
-    # ── Admin Security ───────────────────────────────────────────────────
+    # ── Admin Security ───────────────────────────────────────────────────────
     ADMIN_API_KEY: str = ""
 
-    # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────
+    # ── JWT Authentication ───────────────────────────────────────────────────
+    JWT_SECRET_KEY: str = "change-me-in-production-use-openssl-rand-hex-32"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10_080  # 7 days
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+
+    # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────────
     TF_ENABLE_ONEDNN_OPTS: str = "0"
     TF_CPP_MIN_LOG_LEVEL: str = "2"
+
+    # ── Legacy (kept for backwards compat; no longer used) ──────────────
+    GROQ_API_KEY: str = ""
+    HF_TOKEN: str = ""
 
 
 @lru_cache(maxsize=1)

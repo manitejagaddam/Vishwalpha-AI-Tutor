@@ -147,7 +147,7 @@ class CurriculumRouting(Base):
     subject   = Column(String(100), nullable=True, index=True)
     chapter   = Column(String(200), nullable=True)
     topic     = Column(String(200), nullable=True)
-    vector    = Column(Vector(384))
+    vector    = Column(Vector(1536))
 
 
 class CurriculumContent(Base):
@@ -163,7 +163,7 @@ class CurriculumContent(Base):
     chapter   = Column(String(200), nullable=True)
     topic     = Column(String(200), nullable=True)
     content   = Column(Text, nullable=True)
-    vector    = Column(Vector(384))
+    vector    = Column(Vector(1536))
 
 
 # ── Students & Identity ───────────────────────────────────────────────────────
@@ -385,6 +385,7 @@ class ConversationSession(Base):
     # Quiz / assignment tracking
     topics_covered      = Column(Text, nullable=True, default="[]")    # JSON array of topic names covered
     last_topic_name     = Column(String(300), nullable=True)           # Most recent topic for assignment prompt
+    chat_title          = Column(String(150), nullable=True)           # LLM-generated chat summary title
 
     # ── Session Analytics (new) ──
     ended_at            = Column(DateTime(timezone=True), nullable=True)

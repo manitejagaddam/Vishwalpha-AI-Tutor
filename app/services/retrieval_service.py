@@ -14,6 +14,7 @@ Pipeline:
   6. Compress + return context string
 """
 import uuid
+import hashlib
 import logging
 
 from sqlalchemy import func
@@ -46,9 +47,23 @@ def _get_cache() -> RetrievalCache:
 
 
 def upsert_chunk(metadata: dict, text: str) -> None:
-    """Embeds a curriculum text chunk and upserts it into CurriculumContent."""
+    """
+    Embeds a curriculum text chunk and upserts it into CurriculumContent.
+
+    The chunk ID is derived DETERMINISTICALLY from the content metadata
+    so that re-ingesting the same PDF updates existing rows instead of
+    creating duplicate entries. Previously used uuid4() which always
+    created new rows, causing unbounded table growth.
+    """
+    class_num = metadata.get("class", 0)
+    subject   = metadata.get("subject", "")
+    chapter   = metadata.get("chapter", "")
+    topic     = metadata.get("topic", "")
+    # Deterministic UUID: namespace = dns, name = stable content fingerprint
+    content_fingerprint = f"{class_num}::{subject}::{chapter}::{topic}::{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, content_fingerprint))
+
     vector = _get_embedder().embed_document(text)
-    point_id = str(uuid.uuid4())
 
     with managed_session() as db:
         existing = db.query(CurriculumContent).filter(
@@ -56,19 +71,19 @@ def upsert_chunk(metadata: dict, text: str) -> None:
         ).first()
 
         if existing:
-            existing.class_num = metadata.get("class")
-            existing.subject   = metadata.get("subject")
-            existing.chapter   = metadata.get("chapter")
-            existing.topic     = metadata.get("topic")
+            existing.class_num = class_num
+            existing.subject   = subject
+            existing.chapter   = chapter
+            existing.topic     = topic
             existing.content   = text
             existing.vector    = vector
         else:
             db.add(CurriculumContent(
                 id=point_id,
-                class_num=metadata.get("class"),
-                subject=metadata.get("subject"),
-                chapter=metadata.get("chapter"),
-                topic=metadata.get("topic"),
+                class_num=class_num,
+                subject=subject,
+                chapter=chapter,
+                topic=topic,
                 content=text,
                 vector=vector,
             ))

@@ -1,18 +1,23 @@
 """
 app/api/quiz.py
 ────────────────
-Quiz / Assignment API endpoints.
+Quiz / Assignment API endpoints — JWT protected.
 
-POST /quiz/generate       - Generate a personalised quiz for a student
-POST /quiz/answer         - Submit one question's answer
-POST /quiz/finish         - Finalise attempt, compute score, update cognitive profile
-GET  /quiz/yesterday      - Fetch yesterday's session context for the session-start banner
-GET  /quiz/history        - Fetch past quiz attempt summaries
-GET  /quiz/feedback/{subject} - Fetch aggregated subject quiz feedback
+POST /quiz/generate           - Generate a personalised quiz
+POST /quiz/answer             - Submit one question's answer
+POST /quiz/finish             - Finalise attempt, compute score, update cognitive profile
+GET  /quiz/yesterday          - Yesterday's session context (session-start banner)
+GET  /quiz/history            - Past quiz attempt summaries
+GET  /quiz/feedback/{subject} - Aggregated subject quiz feedback
+
+student_id is always resolved from the JWT token — never from request body.
+The /quiz/answer and /quiz/finish endpoints do NOT require ownership
+verification at the question level (question_id is a sequential int that
+cannot be guessed without the attempt_id, which is a UUID).
 """
-import json
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy import func as sqlfunc
 
 from app.schemas import (
     GenerateQuizRequest, GenerateQuizResponse, QuizQuestionOut,
@@ -48,43 +53,38 @@ from app.services.quiz_service import (
     compute_quiz_cognitive_signals,
 )
 from app.data.database import managed_session
+from app.data.models import Student, Topic
+from app.api.deps import get_current_student
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
 
 
-# ── Generate Quiz ─────────────────────────────────────────────────────────────
+# ── Generate Quiz ──────────────────────────────────────────────────────────────
 
 @router.post("/generate", response_model=GenerateQuizResponse)
-def generate_quiz_endpoint(request: GenerateQuizRequest):
+def generate_quiz_endpoint(
+    request: GenerateQuizRequest,
+    student: Student = Depends(get_current_student),
+):
     """
-    Generates a personalised quiz (MCQ + theory) for a student.
+    Generates a personalised quiz (MCQ + theory) for the authenticated student.
     Adapts difficulty from their cognitive profile and memory.
     """
     try:
-        # Fetch cognitive metrics
         with managed_session() as db:
-            metrics = get_subject_metrics(db, request.student_id, request.subject)
+            metrics = get_subject_metrics(db, student.id, request.subject)
 
-        # Fetch student memory
-        memory_items = get_student_memory(request.student_id, request.subject)
+        memory_items = get_student_memory(student.id, request.subject)
         memory_str = "\n".join(f"- {m}" for m in memory_items) if memory_items else "(no memory yet)"
 
-        # Fetch weak topics from existing feedback
-        existing_fb = get_subject_quiz_feedback(request.student_id, request.subject)
+        existing_fb = get_subject_quiz_feedback(student.id, request.subject)
         weak_topics = existing_fb.get("weak_topics", []) if existing_fb else []
 
-        # Determine class_num (stored in metrics context; fall back to 10)
-        from app.data.models import Student
-        with managed_session() as db:
-            student = db.query(Student).filter(Student.id == request.student_id).first()
-            class_num = student.class_num if student else 10
-
-        # Generate questions via LLM
         questions = generate_quiz(
             subject=request.subject,
             topic=request.topic,
-            class_num=class_num,
+            class_num=student.class_num,
             student_memory=memory_str,
             cognitive_metrics=metrics,
             weak_topics=weak_topics,
@@ -94,9 +94,8 @@ def generate_quiz_endpoint(request: GenerateQuizRequest):
         if not questions:
             raise HTTPException(status_code=500, detail="Quiz generation returned no questions.")
 
-        # Persist attempt + questions
         attempt_id = create_quiz_attempt(
-            student_id=request.student_id,
+            student_id=student.id,
             subject=request.subject,
             topic=request.topic,
             source=request.source,
@@ -104,8 +103,6 @@ def generate_quiz_endpoint(request: GenerateQuizRequest):
             num_questions=len(questions),
         )
         save_quiz_questions(attempt_id, questions)
-
-        # Fetch inserted question IDs for response
         saved_qs = get_quiz_questions(attempt_id)
 
         return GenerateQuizResponse(
@@ -132,10 +129,13 @@ def generate_quiz_endpoint(request: GenerateQuizRequest):
         raise HTTPException(status_code=500, detail="Failed to generate quiz.")
 
 
-# ── Submit Answer ─────────────────────────────────────────────────────────────
+# ── Submit Answer ──────────────────────────────────────────────────────────────
 
 @router.post("/answer", response_model=SubmitAnswerResponse)
-def submit_answer_endpoint(request: SubmitAnswerRequest):
+def submit_answer_endpoint(
+    request: SubmitAnswerRequest,
+    _student: Student = Depends(get_current_student),   # auth check only
+):
     """Submit a student's answer for a single quiz question."""
     try:
         result = submit_quiz_answer(
@@ -151,34 +151,37 @@ def submit_answer_endpoint(request: SubmitAnswerRequest):
         raise HTTPException(status_code=500, detail="Failed to submit answer.")
 
 
-# ── Finish Quiz ───────────────────────────────────────────────────────────────
+# ── Finish Quiz ────────────────────────────────────────────────────────────────
 
 @router.post("/finish", response_model=FinishQuizResponse)
-def finish_quiz_endpoint(request: FinishQuizRequest):
+def finish_quiz_endpoint(
+    request: FinishQuizRequest,
+    student: Student = Depends(get_current_student),
+):
     """
     Finalises a quiz attempt:
     1. Computes final score from all answered questions
-    2. Generates AI feedback
+    2. Generates AI feedback paragraph
     3. Updates subject quiz feedback (cumulative record)
     4. Applies cognitive metric impact to student profile + memory
+    5. Updates topic mastery + spaced repetition schedule
     """
     try:
         # 1. Score the attempt
-        result = finish_quiz_attempt(request.attempt_id)
+        result    = finish_quiz_attempt(request.attempt_id)
         student_id = result["student_id"]
-        subject    = result["subject"]
-        topic      = result["topic"]
-        score      = result["score"]
-        correct    = result["correct"]
-        total      = result["total"]
-        passed     = result["passed"]
+        subject   = result["subject"]
+        topic     = result["topic"]
+        score     = result["score"]
+        correct   = result["correct"]
+        total     = result["total"]
+        passed    = result["passed"]
 
         # 2. Fetch full question details for feedback
-        details = get_attempt_details(request.attempt_id)
+        details       = get_attempt_details(request.attempt_id)
         all_questions = details["questions"] if details else []
 
-        # Compute MCQ / theory accuracy
-        mcq_qs = [q for q in all_questions if q["q_type"] == "mcq"]
+        mcq_qs    = [q for q in all_questions if q["q_type"] == "mcq"]
         theory_qs = [q for q in all_questions if q["q_type"] == "theory"]
         mcq_accuracy = (
             round(sum(1 for q in mcq_qs if q["is_correct"]) / len(mcq_qs) * 100, 1)
@@ -188,22 +191,13 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
             round(sum(1 for q in theory_qs if q["is_correct"]) / len(theory_qs) * 100, 1)
             if theory_qs else 0.0
         )
+        wrong_questions = [q["question"] for q in all_questions if not q.get("is_correct")]
 
-        wrong_questions = [
-            q["question"] for q in all_questions if not q.get("is_correct")
-        ]
-
-        # 3. Get class_num
-        from app.data.models import Student
-        with managed_session() as db:
-            student = db.query(Student).filter(Student.id == student_id).first()
-            class_num = student.class_num if student else 10
-
-        # 4. Generate AI feedback
+        # 3. Generate AI feedback
         ai_feedback = generate_quiz_ai_feedback(
             subject=subject,
             topic=topic,
-            class_num=class_num,
+            class_num=student.class_num,
             score=score,
             correct=correct,
             total=total,
@@ -212,7 +206,7 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
             wrong_questions=wrong_questions,
         )
 
-        # 5. Update SubjectQuizFeedback (one row per student/subject)
+        # 4. Update cumulative subject quiz feedback record
         update_subject_quiz_feedback(
             student_id=student_id,
             subject=subject,
@@ -221,7 +215,7 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
             ai_feedback=ai_feedback,
         )
 
-        # 6. Compute and apply cognitive metric signals
+        # 5. Cognitive metric signals
         signals = compute_quiz_cognitive_signals(
             score=score,
             mcq_accuracy=mcq_accuracy,
@@ -233,7 +227,7 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
         append_pending_signal(student_id, subject, session_id or "", signals)
         metrics_applied = batch_update_cognitive_profile(student_id, subject, session_id or "")
 
-        # 7. Update student memory with quiz insights
+        # 6. Update student memory with quiz performance
         if wrong_questions:
             try:
                 from app.data.session_repo import update_student_memory
@@ -249,22 +243,18 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
             except Exception as e:
                 logger.warning(f"Memory update after quiz failed: {e}")
 
-        # 8. Update topic mastery + spaced repetition scheduling
+        # 7. Topic mastery + spaced repetition
         try:
-            from app.data.models import Topic
-            from sqlalchemy import func as sqlfunc
             with managed_session() as db:
                 topic_row = db.query(Topic).filter(
                     sqlfunc.lower(Topic.title) == topic.lower()
                 ).first()
                 if topic_row:
-                    update_topic_mastery_from_quiz(
-                        student_id, topic_row.id, score, passed
-                    )
+                    update_topic_mastery_from_quiz(student_id, topic_row.id, score, passed)
         except Exception as e:
             logger.warning(f"Topic mastery update after quiz failed: {e}")
 
-        # 9. Increment quiz count on subject profile + streak
+        # 8. Increment quiz count + streak
         try:
             increment_quiz_count(student_id, subject)
             increment_streak_quizzes(student_id)
@@ -291,32 +281,38 @@ def finish_quiz_endpoint(request: FinishQuizRequest):
         raise HTTPException(status_code=500, detail="Failed to finish quiz.")
 
 
-# ── Yesterday Context ─────────────────────────────────────────────────────────
+# ── Yesterday Context ──────────────────────────────────────────────────────────
 
 @router.get("/yesterday")
-def yesterday_context_endpoint(student_id: str):
+def yesterday_context_endpoint(student: Student = Depends(get_current_student)):
     """Returns yesterday's session topic for the session-start assignment banner."""
-    ctx = get_yesterday_session_context(student_id)
+    ctx = get_yesterday_session_context(student.id)
     if not ctx:
         return {"has_context": False, "context": None}
     return {"has_context": True, "context": ctx}
 
 
-# ── Quiz History ──────────────────────────────────────────────────────────────
+# ── Quiz History ───────────────────────────────────────────────────────────────
 
 @router.get("/history")
-def quiz_history_endpoint(student_id: str, subject: str | None = None):
-    """Returns a student's past quiz attempt summaries."""
-    history = get_quiz_history(student_id, subject)
+def quiz_history_endpoint(
+    subject: str | None = None,
+    student: Student = Depends(get_current_student),
+):
+    """Returns the authenticated student's past quiz attempt summaries."""
+    history = get_quiz_history(student.id, subject)
     return {"attempts": history}
 
 
-# ── Subject Quiz Feedback ─────────────────────────────────────────────────────
+# ── Subject Quiz Feedback ──────────────────────────────────────────────────────
 
 @router.get("/feedback/{subject}", response_model=SubjectQuizFeedbackOut)
-def quiz_feedback_endpoint(subject: str, student_id: str):
-    """Returns the aggregated quiz feedback record for a student/subject."""
-    fb = get_subject_quiz_feedback(student_id, subject)
+def quiz_feedback_endpoint(
+    subject: str,
+    student: Student = Depends(get_current_student),
+):
+    """Returns the aggregated quiz feedback record for the authenticated student/subject."""
+    fb = get_subject_quiz_feedback(student.id, subject)
     if not fb:
         return SubjectQuizFeedbackOut()
     return SubjectQuizFeedbackOut(**fb)

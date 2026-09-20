@@ -16,7 +16,7 @@ import re
 import json
 import logging
 
-from app.infra.groq_client import get_groq
+from app.infra.azure_openai_client import get_openai
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ def generate_quiz(
     Now includes difficulty and bloom_level per question.
     Falls back to a minimal stub on LLM failure so the UI never crashes.
     """
-    client = get_groq()
+    client = get_openai()
 
     concept_score = cognitive_metrics.get("concept_master_score", 50)
     thinking_level = cognitive_metrics.get("cognitive_thinking_level", 50)
@@ -146,9 +146,9 @@ def generate_quiz(
     try:
         resp = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model=settings.GROQ_MODEL,
+            model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.6,
-            max_tokens=3000,
+            max_completion_tokens=3000,
         )
         raw = resp.choices[0].message.content.strip()
 
@@ -240,7 +240,7 @@ def generate_quiz_ai_feedback(
     wrong_questions: list[str],
 ) -> str:
     """Generates a personalised AI feedback paragraph after quiz completion."""
-    client = get_groq()
+    client = get_openai()
     wrong_str = "\n".join(f"- {q}" for q in wrong_questions[:5]) if wrong_questions else "None"
 
     prompt = _FEEDBACK_PROMPT.format(
@@ -258,9 +258,9 @@ def generate_quiz_ai_feedback(
     try:
         resp = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
+            model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.4,
-            max_tokens=200,
+            max_completion_tokens=200,
         )
         return resp.choices[0].message.content.strip()
     except Exception as exc:

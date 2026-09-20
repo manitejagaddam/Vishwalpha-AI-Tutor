@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="VishwAlpha AI Tutor",
-        description="Personalised NCERT curriculum tutor powered by RAG + Groq LLM",
+        description="Personalised NCERT curriculum tutor powered by RAG + Azure OpenAI (GPT-4.1-mini, text-embedding-3-small)",
         version="2.0.0",
         lifespan=lifespan,
     )
@@ -66,10 +66,11 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # ── Middlewares
+    # ── CORS: origins from env var (comma-separated list) ──────────────────────
+    _origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Restrict in production
+        allow_origins=_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

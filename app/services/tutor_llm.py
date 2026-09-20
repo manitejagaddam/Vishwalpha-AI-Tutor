@@ -1,7 +1,8 @@
 """
 app/services/tutor_llm.py
 ──────────────────────────
-LLM generation service — builds prompts and calls Groq.
+LLM generation service — builds prompts and calls the Azure OpenAI
+chat completions endpoint (viswalpha-gpt-4.1-mini).
 
 Supports 3 generation modes:
   curriculum      — strict RAG: answers ONLY from retrieved context
@@ -15,7 +16,7 @@ Enhanced with:
 """
 import json
 import logging
-from app.infra.groq_client import get_groq
+from app.infra.azure_openai_client import get_openai
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -170,8 +171,8 @@ class TutorLLM:
     """
 
     def __init__(self, model: str | None = None):
-        self.model = model or settings.GROQ_MODEL
-        self.client = get_groq()
+        self.model = model or settings.AZURE_OPENAI_CHAT_DEPLOYMENT
+        self.client = get_openai()
 
     def generate(
         self,
@@ -242,7 +243,7 @@ class TutorLLM:
             messages=messages,
             model=self.model,
             temperature=temp,
-            max_tokens=max_tok,
+            max_completion_tokens=max_tok,
         )
 
         answer = response.choices[0].message.content.strip()
@@ -268,12 +269,37 @@ Answer with ONLY one word: 'curriculum' or 'conversational'"""
 
         response = self.client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
+            model=self.model,
             temperature=0.0,
-            max_tokens=5,
+            max_completion_tokens=5,
         )
         raw = response.choices[0].message.content.strip().lower()
         return "curriculum" if "curriculum" in raw else "conversational"
+
+    def generate_chat_title(self, first_message: str) -> str:
+        """
+        Generates a 3-5 word summary title for the chat based on the first student message.
+        Uses a fast, low-cost Azure OpenAI completion.
+        """
+        prompt = (
+            f"You are a helpful assistant. Summarize the following user message into a short, catchy chat title "
+            f"in 3 to 5 words. Do not use quotes or punctuation.\n\nUser Message: {first_message}"
+        )
+        try:
+            client = get_openai()
+            response = client.chat.completions.create(
+                model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=15,
+                temperature=0.3
+            )
+            title = response.choices[0].message.content.strip().strip('"').strip("'")
+            return title
+        except Exception as e:
+            logger.error(f"Failed to generate chat title: {e}")
+            # Fallback if the LLM call fails
+            words = first_message.split()
+            return " ".join(words[:5]) + ("..." if len(words) > 5 else "")
 
     def generate_remark(self, conversation_context: str) -> str:
         """Generates a brief teacher-style remark about the session."""
@@ -287,9 +313,9 @@ Session summary:
         try:
             response = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.1-8b-instant",
+                model=self.model,
                 temperature=0.4,
-                max_tokens=150,
+                max_completion_tokens=150,
             )
             return response.choices[0].message.content.strip()
         except Exception as exc:
