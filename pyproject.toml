@@ -5,6 +5,7 @@ description = "A personalised AI Tutor with adaptive learning, AI-powered doubt 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "alembic>=1.20.0",
     "cachetools>=5.0",
     "fastapi>=0.136.1",
     "openai>=1.57.0",

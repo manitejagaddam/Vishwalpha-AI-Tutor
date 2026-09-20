@@ -23,15 +23,16 @@ from datetime import date, timedelta, datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.data.database import managed_session
-from app.data.models import (
+from app.data.models.learning import (
     StudentSubjectProfile,
     OverallCognitiveProfile,
     PendingMetricSignal,
-    StudentTopicMastery,
+    TopicMastery,
     StudentStreak,
-    StudentLearningPreference,
-    Student,
+    LearningPreference,
 )
+from app.data.models.platform import User
+from app.data.models.content import Topic, Chapter, Subject
 
 logger = logging.getLogger(__name__)
 
@@ -112,34 +113,49 @@ def _clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
 
 
 def _get_or_create_profile(
-    db: Session, student_id: str, subject: str
+    db: Session, user_id: str, subject_id: int
 ) -> StudentSubjectProfile:
     profile = db.query(StudentSubjectProfile).filter(
-        StudentSubjectProfile.student_id == student_id,
-        StudentSubjectProfile.subject == subject,
+        StudentSubjectProfile.user_id == user_id,
+        StudentSubjectProfile.subject_id == subject_id,
     ).first()
     if not profile:
         profile = StudentSubjectProfile(
             id=str(uuid.uuid4()),
-            student_id=student_id,
-            subject=subject,
+            user_id=user_id,
+            subject_id=subject_id,
         )
         db.add(profile)
         db.flush()
     return profile
 
+def _update_overall_profile(db: Session, user_id: str) -> None:
+    """Averages all subject profiles to update the OverallCognitiveProfile."""
+    profiles = db.query(StudentSubjectProfile).filter(StudentSubjectProfile.user_id == user_id).all()
+    if not profiles:
+        return
+    
+    overall = db.query(OverallCognitiveProfile).filter(OverallCognitiveProfile.user_id == user_id).first()
+    if not overall:
+        overall = OverallCognitiveProfile(user_id=user_id)
+        db.add(overall)
+        
+    for key in METRICS_KEYS:
+        avg_val = sum(getattr(p, key, 50.0) for p in profiles) / len(profiles)
+        setattr(overall, key, avg_val)
+    db.flush()
 
 # ── Public API: Metrics ───────────────────────────────────────────────────────
 
-def get_subject_metrics(db: Session, student_id: str, subject: str) -> dict:
+def get_subject_metrics(db: Session, user_id: str, subject_id: int) -> dict:
     """Returns all 10 cognitive metrics for a student/subject."""
-    profile = _get_or_create_profile(db, student_id, subject)
+    profile = _get_or_create_profile(db, user_id, subject_id)
     return {k: getattr(profile, k, 50.0) for k in METRICS_KEYS}
 
 
-def get_full_subject_profile(db: Session, student_id: str, subject: str) -> dict:
+def get_full_subject_profile(db: Session, user_id: str, subject_id: int) -> dict:
     """Returns all cognitive metrics + enhanced tracking fields."""
-    profile = _get_or_create_profile(db, student_id, subject)
+    profile = _get_or_create_profile(db, user_id, subject_id)
     base = {k: getattr(profile, k, 50.0) for k in METRICS_KEYS}
     base.update({
         "bloom_level_avg": profile.bloom_level_avg or 1.0,
@@ -182,8 +198,8 @@ def compute_cognitive_skills(metrics: dict) -> dict:
 
 def update_subject_profile(
     db: Session,
-    student_id: str,
-    subject: str,
+    user_id: str,
+    subject_id: int,
     raw_adjustments: dict,
     source: str = "chat",
 ) -> dict:
@@ -192,7 +208,7 @@ def update_subject_profile(
     Does NOT commit — caller owns the transaction.
     Returns applied adjustments.
     """
-    profile = _get_or_create_profile(db, student_id, subject)
+    profile = _get_or_create_profile(db, user_id, subject_id)
     applied = {}
 
     for key in METRICS_KEYS:
@@ -214,41 +230,42 @@ def update_subject_profile(
 
 
 def apply_profile_preset(
-    db: Session, student_id: str, subject: str, profile_name: str
+    db: Session, user_id: str, subject_id: int, profile_name: str
 ) -> dict:
     """Overwrites all metrics using a named preset."""
     preset = PROFILE_PRESETS.get(profile_name)
     if not preset:
         raise ValueError(f"Unknown profile preset: '{profile_name}'")
 
-    profile = _get_or_create_profile(db, student_id, subject)
+    profile = _get_or_create_profile(db, user_id, subject_id)
     for key, val in preset.items():
         setattr(profile, key, val)
-
+        
+    _update_overall_profile(db, user_id)
     db.commit()
-    return get_subject_metrics(db, student_id, subject)
+    return get_subject_metrics(db, user_id, subject_id)
 
 
-def increment_chat_turns(student_id: str, subject: str) -> None:
+def increment_chat_turns(user_id: str, subject_id: int) -> None:
     """Increments total_chat_turns on the subject profile. Called on every chat turn."""
     with managed_session() as db:
-        profile = _get_or_create_profile(db, student_id, subject)
+        profile = _get_or_create_profile(db, user_id, subject_id)
         profile.total_chat_turns = (profile.total_chat_turns or 0) + 1
 
 
-def increment_quiz_count(student_id: str, subject: str) -> None:
+def increment_quiz_count(user_id: str, subject_id: int) -> None:
     """Increments total_quizzes on the subject profile. Called when a quiz is finished."""
     with managed_session() as db:
-        profile = _get_or_create_profile(db, student_id, subject)
+        profile = _get_or_create_profile(db, user_id, subject_id)
         profile.total_quizzes = (profile.total_quizzes or 0) + 1
 
 
 def update_emotional_indicators(
-    student_id: str, subject: str, frustration_delta: float, confidence_delta: float
+    user_id: str, subject_id: int, frustration_delta: float, confidence_delta: float
 ) -> None:
     """Updates frustration_index and confidence_index with deltas."""
     with managed_session() as db:
-        profile = _get_or_create_profile(db, student_id, subject)
+        profile = _get_or_create_profile(db, user_id, subject_id)
         profile.frustration_index = _clamp(
             (profile.frustration_index or 0.0) + frustration_delta
         )
@@ -355,7 +372,7 @@ def detect_sentiment(question: str) -> str:
 
 
 def append_pending_signal(
-    student_id: str, subject: str, session_id: str, signals: dict
+    user_id: str, subject_id: int, conversation_id: str, signals: dict
 ) -> None:
     """Queues a signal dict for the next batch update."""
     if not signals:
@@ -366,7 +383,7 @@ def append_pending_signal(
     confidence_delta = signals.pop("_confidence_delta", 0.0)
     if frustration_delta or confidence_delta:
         try:
-            update_emotional_indicators(student_id, subject, frustration_delta, confidence_delta)
+            update_emotional_indicators(user_id, subject_id, frustration_delta, confidence_delta)
         except Exception as e:
             logger.warning(f"Emotional indicator update failed: {e}")
 
@@ -375,15 +392,15 @@ def append_pending_signal(
 
     with managed_session() as db:
         db.add(PendingMetricSignal(
-            student_id=student_id,
-            subject=subject,
-            session_id=session_id,
-            signals=json.dumps(signals),
+            user_id=user_id,
+            subject_id=subject_id,
+            conversation_id=conversation_id,
+            signals=signals,
         ))
 
 
 def batch_update_cognitive_profile(
-    student_id: str, subject: str, session_id: str
+    user_id: str, subject_id: int, conversation_id: str
 ) -> dict:
     """
     Drains all pending signals for this student/subject and applies them.
@@ -392,8 +409,8 @@ def batch_update_cognitive_profile(
     """
     with managed_session() as db:
         pending = db.query(PendingMetricSignal).filter(
-            PendingMetricSignal.student_id == student_id,
-            PendingMetricSignal.subject == subject,
+            PendingMetricSignal.user_id == user_id,
+            PendingMetricSignal.subject_id == subject_id,
         ).all()
 
         if not pending:
@@ -402,15 +419,19 @@ def batch_update_cognitive_profile(
         merged: dict[str, float] = {}
         for record in pending:
             try:
-                sigs = json.loads(record.signals)
+                sigs = record.signals
+                if isinstance(sigs, str):
+                    sigs = json.loads(sigs)
                 for k, v in sigs.items():
-                    merged[k] = merged.get(k, 0.0) + v
+                    merged[k] = merged.get(k, 0.0) + float(v)
             except Exception:
                 pass
 
         # Convert to delta format
         adjustments = {k: {"delta": v} for k, v in merged.items()}
-        applied = update_subject_profile(db, student_id, subject, adjustments, source="batch")
+        applied = update_subject_profile(db, user_id, subject_id, adjustments, source="batch")
+
+        _update_overall_profile(db, user_id)
 
         # Delete processed signals
         for record in pending:
@@ -422,16 +443,16 @@ def batch_update_cognitive_profile(
 # ── Topic Mastery ─────────────────────────────────────────────────────────────
 
 def get_or_create_topic_mastery(
-    db: Session, student_id: str, topic_id: int
-) -> StudentTopicMastery:
+    db: Session, user_id: str, topic_id: int
+) -> TopicMastery:
     """Gets or creates a topic mastery record."""
-    mastery = db.query(StudentTopicMastery).filter(
-        StudentTopicMastery.student_id == student_id,
-        StudentTopicMastery.topic_id == topic_id,
+    mastery = db.query(TopicMastery).filter(
+        TopicMastery.user_id == user_id,
+        TopicMastery.topic_id == topic_id,
     ).first()
     if not mastery:
-        mastery = StudentTopicMastery(
-            student_id=student_id,
+        mastery = TopicMastery(
+            user_id=user_id,
             topic_id=topic_id,
             first_visited=datetime.now(timezone.utc),
         )
@@ -441,7 +462,7 @@ def get_or_create_topic_mastery(
 
 
 def update_topic_mastery_from_chat(
-    student_id: str, topic_id: int, bloom_level: str
+    user_id: str, topic_id: int, bloom_level: str
 ) -> None:
     """
     Updates topic mastery after a chat turn about this topic.
@@ -454,7 +475,7 @@ def update_topic_mastery_from_chat(
     bloom_num = bloom_map.get(bloom_level, 1)
 
     with managed_session() as db:
-        mastery = get_or_create_topic_mastery(db, student_id, topic_id)
+        mastery = get_or_create_topic_mastery(db, user_id, topic_id)
         mastery.times_visited = (mastery.times_visited or 0) + 1
         mastery.last_visited = datetime.now(timezone.utc)
 
@@ -468,14 +489,14 @@ def update_topic_mastery_from_chat(
 
 
 def update_topic_mastery_from_quiz(
-    student_id: str, topic_id: int, quiz_score: float, passed: bool
+    user_id: str, topic_id: int, quiz_score: float, passed: bool
 ) -> None:
     """
     Updates topic mastery after a quiz on this topic.
     Quiz results have a stronger impact than chat signals.
     """
     with managed_session() as db:
-        mastery = get_or_create_topic_mastery(db, student_id, topic_id)
+        mastery = get_or_create_topic_mastery(db, user_id, topic_id)
         mastery.last_quiz_score = quiz_score
         mastery.times_visited = (mastery.times_visited or 0) + 1
         mastery.last_visited = datetime.now(timezone.utc)
@@ -498,7 +519,7 @@ def update_topic_mastery_from_quiz(
 
 
 def _schedule_spaced_review(
-    mastery: StudentTopicMastery, score: float, passed: bool
+    mastery: TopicMastery, score: float, passed: bool
 ) -> None:
     """
     Implements a simplified SM-2 spaced repetition algorithm.
@@ -532,89 +553,88 @@ def _schedule_spaced_review(
     mastery.next_review_date = date.today() + timedelta(days=interval_days)
 
 
-def get_student_weak_topics(student_id: str, subject: str | None = None) -> list[dict]:
+def get_student_weak_topics(user_id: str, subject_id: int | None = None) -> list[dict]:
     """Returns topics where student mastery is below 40% — these need attention."""
+    from app.data.models.content import Book
     with managed_session() as db:
-        from app.data.models import Topic, Chapter, Subject as SubjectModel
         query = (
-            db.query(StudentTopicMastery, Topic)
-            .join(Topic, StudentTopicMastery.topic_id == Topic.id)
+            db.query(TopicMastery, Topic)
+            .join(Topic, TopicMastery.topic_id == Topic.id)
             .filter(
-                StudentTopicMastery.student_id == student_id,
-                StudentTopicMastery.mastery_level < 40,
+                TopicMastery.user_id == user_id,
+                TopicMastery.mastery_level < 40,
             )
         )
-        if subject:
+        if subject_id:
             query = query.join(Chapter, Topic.chapter_id == Chapter.id)\
-                         .join(SubjectModel, Chapter.subject_id == SubjectModel.id)\
-                         .filter(SubjectModel.name.ilike(f"%{subject}%"))
+                         .join(Book, Chapter.book_id == Book.id)\
+                         .filter(Book.subject_id == subject_id)
 
-        results = query.order_by(StudentTopicMastery.mastery_level.asc()).limit(10).all()
+        results = query.order_by(TopicMastery.mastery_level.asc()).limit(10).all()
         return [
             {
-                "topic_id": m.StudentTopicMastery.topic_id,
+                "topic_id": m.TopicMastery.topic_id,
                 "topic_title": m.Topic.title,
-                "mastery_level": m.StudentTopicMastery.mastery_level,
-                "bloom_level": m.StudentTopicMastery.bloom_level_reached,
-                "times_visited": m.StudentTopicMastery.times_visited,
+                "mastery_level": m.TopicMastery.mastery_level,
+                "bloom_level": m.TopicMastery.bloom_level_reached,
+                "times_visited": m.TopicMastery.times_visited,
             }
             for m in results
         ]
 
 
-def get_student_strong_topics(student_id: str, subject: str | None = None) -> list[dict]:
+def get_student_strong_topics(user_id: str, subject_id: int | None = None) -> list[dict]:
     """Returns topics where student mastery is above 70%."""
+    from app.data.models.content import Book
     with managed_session() as db:
-        from app.data.models import Topic, Chapter, Subject as SubjectModel
         query = (
-            db.query(StudentTopicMastery, Topic)
-            .join(Topic, StudentTopicMastery.topic_id == Topic.id)
+            db.query(TopicMastery, Topic)
+            .join(Topic, TopicMastery.topic_id == Topic.id)
             .filter(
-                StudentTopicMastery.student_id == student_id,
-                StudentTopicMastery.mastery_level >= 70,
+                TopicMastery.user_id == user_id,
+                TopicMastery.mastery_level >= 70,
             )
         )
-        if subject:
+        if subject_id:
             query = query.join(Chapter, Topic.chapter_id == Chapter.id)\
-                         .join(SubjectModel, Chapter.subject_id == SubjectModel.id)\
-                         .filter(SubjectModel.name.ilike(f"%{subject}%"))
+                         .join(Book, Chapter.book_id == Book.id)\
+                         .filter(Book.subject_id == subject_id)
 
-        results = query.order_by(StudentTopicMastery.mastery_level.desc()).limit(10).all()
+        results = query.order_by(TopicMastery.mastery_level.desc()).limit(10).all()
         return [
             {
-                "topic_id": m.StudentTopicMastery.topic_id,
+                "topic_id": m.TopicMastery.topic_id,
                 "topic_title": m.Topic.title,
-                "mastery_level": m.StudentTopicMastery.mastery_level,
-                "bloom_level": m.StudentTopicMastery.bloom_level_reached,
+                "mastery_level": m.TopicMastery.mastery_level,
+                "bloom_level": m.TopicMastery.bloom_level_reached,
             }
             for m in results
         ]
 
 
-def get_topics_due_for_review(student_id: str) -> list[dict]:
+def get_topics_due_for_review(user_id: str) -> list[dict]:
     """Returns topics whose next_review_date is today or earlier — for spaced repetition."""
     today = date.today()
     with managed_session() as db:
-        from app.data.models import Topic
         results = (
-            db.query(StudentTopicMastery, Topic)
-            .join(Topic, StudentTopicMastery.topic_id == Topic.id)
+            db.query(TopicMastery, Topic)
+            .join(Topic, TopicMastery.topic_id == Topic.id)
             .filter(
-                StudentTopicMastery.student_id == student_id,
-                StudentTopicMastery.next_review_date <= today,
+                TopicMastery.user_id == user_id,
+                TopicMastery.next_review_date <= today,
             )
-            .order_by(StudentTopicMastery.next_review_date.asc())
+            .order_by(TopicMastery.next_review_date.asc())
             .limit(5)
             .all()
         )
         return [
             {
-                "topic_id": m.StudentTopicMastery.topic_id,
+                "topic_id": m.TopicMastery.topic_id,
                 "topic_title": m.Topic.title,
-                "mastery_level": m.StudentTopicMastery.mastery_level,
-                "last_quiz_score": m.StudentTopicMastery.last_quiz_score,
-                "review_count": m.StudentTopicMastery.review_count,
-                "next_review_date": str(m.StudentTopicMastery.next_review_date),
+                "mastery_level": m.TopicMastery.mastery_level,
+                "last_quiz_score": m.TopicMastery.last_quiz_score,
+                "review_count": m.TopicMastery.review_count,
+                "next_review_date": str(m.TopicMastery.next_review_date),
             }
             for m in results
         ]
@@ -622,7 +642,7 @@ def get_topics_due_for_review(student_id: str) -> list[dict]:
 
 # ── Streak Management ────────────────────────────────────────────────────────
 
-def update_student_streak(student_id: str) -> dict:
+def update_student_streak(user_id: str) -> dict:
     """
     Updates the student's streak based on today's activity.
     Returns the current streak info.
@@ -631,13 +651,12 @@ def update_student_streak(student_id: str) -> dict:
 
     with managed_session() as db:
         streak = db.query(StudentStreak).filter(
-            StudentStreak.student_id == student_id,
+            StudentStreak.user_id == user_id,
         ).first()
 
         if not streak:
             streak = StudentStreak(
-                id=str(uuid.uuid4()),
-                student_id=student_id,
+                user_id=user_id,
                 current_streak_days=1,
                 longest_streak_days=1,
                 last_active_date=today,
@@ -677,8 +696,8 @@ def update_student_streak(student_id: str) -> dict:
         streak.total_active_days = (streak.total_active_days or 0) + 1
         streak.total_sessions = (streak.total_sessions or 0) + 1
 
-        # Update last_active_at on the student record too
-        student = db.query(Student).filter(Student.id == student_id).first()
+        # Update last_active_at on the user record too
+        student = db.query(User).filter(User.id == user_id).first()
         if student:
             student.last_active_at = datetime.now(timezone.utc)
 
@@ -689,31 +708,31 @@ def update_student_streak(student_id: str) -> dict:
         }
 
 
-def increment_streak_questions(student_id: str) -> None:
+def increment_streak_questions(user_id: str) -> None:
     """Increments total_questions_asked counter on streak."""
     with managed_session() as db:
         streak = db.query(StudentStreak).filter(
-            StudentStreak.student_id == student_id,
+            StudentStreak.user_id == user_id,
         ).first()
         if streak:
             streak.total_questions_asked = (streak.total_questions_asked or 0) + 1
 
 
-def increment_streak_quizzes(student_id: str) -> None:
+def increment_streak_quizzes(user_id: str) -> None:
     """Increments total_quizzes_taken counter on streak."""
     with managed_session() as db:
         streak = db.query(StudentStreak).filter(
-            StudentStreak.student_id == student_id,
+            StudentStreak.user_id == user_id,
         ).first()
         if streak:
             streak.total_quizzes_taken = (streak.total_quizzes_taken or 0) + 1
 
 
-def get_student_streak(student_id: str) -> dict:
+def get_student_streak(user_id: str) -> dict:
     """Returns the student's current streak data."""
     with managed_session() as db:
         streak = db.query(StudentStreak).filter(
-            StudentStreak.student_id == student_id,
+            StudentStreak.user_id == user_id,
         ).first()
         if not streak:
             return {
@@ -733,11 +752,11 @@ def get_student_streak(student_id: str) -> dict:
 
 # ── Learning Preferences ─────────────────────────────────────────────────────
 
-def get_learning_preferences(student_id: str) -> dict:
+def get_learning_preferences(user_id: str) -> dict:
     """Returns the student's learning preferences. Returns defaults if none exist."""
     with managed_session() as db:
-        pref = db.query(StudentLearningPreference).filter(
-            StudentLearningPreference.student_id == student_id,
+        pref = db.query(LearningPreference).filter(
+            LearningPreference.user_id == user_id,
         ).first()
         if not pref:
             return {
@@ -745,37 +764,34 @@ def get_learning_preferences(student_id: str) -> dict:
                 "prefers_analogies": 0.5,
                 "prefers_step_by_step": 0.5,
                 "prefers_visuals": 0.5,
-                "preferred_explanation_length": "medium",
-                "attention_span_estimate": 50.0,
-                "responds_to_encouragement": 0.5,
-                "prefers_hindi_mix": 0.0,
+                "preferred_length": "medium",
+                "attention_span_minutes": 50.0,
+                "responds_to_encouragement": True,
             }
         return {
             "prefers_examples": pref.prefers_examples,
             "prefers_analogies": pref.prefers_analogies,
             "prefers_step_by_step": pref.prefers_step_by_step,
             "prefers_visuals": pref.prefers_visuals,
-            "preferred_explanation_length": pref.preferred_explanation_length or "medium",
-            "attention_span_estimate": pref.attention_span_estimate,
-            "responds_to_encouragement": pref.responds_to_encouragement,
-            "prefers_hindi_mix": pref.prefers_hindi_mix,
+            "preferred_length": pref.preferred_length or "medium",
+            "attention_span_minutes": pref.attention_span or 20,
+            "responds_to_encouragement": bool(pref.responds_to_encouragement > 0.5),
         }
 
 
-def nudge_learning_preference(student_id: str, key: str, delta: float) -> None:
+def nudge_learning_preference(user_id: str, key: str, delta: float) -> None:
     """
     Nudges a specific learning preference by a small delta.
     Called by the AI when it detects the student responds well/poorly
     to a particular explanation style.
     """
     with managed_session() as db:
-        pref = db.query(StudentLearningPreference).filter(
-            StudentLearningPreference.student_id == student_id,
+        pref = db.query(LearningPreference).filter(
+            LearningPreference.user_id == user_id,
         ).first()
         if not pref:
-            pref = StudentLearningPreference(
-                id=str(uuid.uuid4()),
-                student_id=student_id,
+            pref = LearningPreference(
+                user_id=user_id,
             )
             db.add(pref)
             db.flush()

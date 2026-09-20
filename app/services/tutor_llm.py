@@ -116,21 +116,16 @@ def _build_teaching_style(prefs: dict) -> str:
         instructions.append("- Student grasps concepts quickly. Give a summary-style explanation.")
 
     # Explanation length
-    length = prefs.get("preferred_explanation_length", "medium")
+    length = prefs.get("preferred_length", "medium")
     if length == "short":
         instructions.append("- Keep explanations brief and to the point.")
     elif length == "detailed":
         instructions.append("- Give thorough, detailed explanations. The student prefers depth.")
 
     # Encouragement
-    enc = prefs.get("responds_to_encouragement", 0.5)
-    if enc > 0.7:
+    enc = prefs.get("responds_to_encouragement", True)
+    if enc:
         instructions.append("- Student is motivated by encouragement. Add praise and motivational language.")
-
-    # Hindi mix
-    hindi = prefs.get("prefers_hindi_mix", 0.0)
-    if hindi > 0.5:
-        instructions.append("- Student is comfortable with Hindi-English mix. You may use common Hindi terms.")
 
     # Visual preference
     vis = prefs.get("prefers_visuals", 0.5)
@@ -278,26 +273,30 @@ Answer with ONLY one word: 'curriculum' or 'conversational'"""
 
     def generate_chat_title(self, first_message: str) -> str:
         """
-        Generates a 3-5 word summary title for the chat based on the first student message.
-        Uses a fast, low-cost Azure OpenAI completion.
+        Generates a Claude-style concise chat heading from the first student message.
+        Short (3-6 words), topic-specific, no filler, no punctuation.
         """
         prompt = (
-            f"You are a helpful assistant. Summarize the following user message into a short, catchy chat title "
-            f"in 3 to 5 words. Do not use quotes or punctuation.\n\nUser Message: {first_message}"
+            "Generate a short, specific heading (3-6 words, no punctuation, no quotes, no filler words like 'question about' or 'help with') "
+            "for a tutoring chat that starts with this student message. "
+            "Be as specific as possible about the concept — like Claude's sidebar titles.\n\n"
+            f"Student: {first_message[:300]}\n\n"
+            "Title:"
         )
         try:
             client = get_openai()
             response = client.chat.completions.create(
                 model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
                 messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=15,
-                temperature=0.3
+                max_completion_tokens=20,
+                temperature=0.2,
             )
             title = response.choices[0].message.content.strip().strip('"').strip("'")
-            return title
+            # Capitalise first letter of each word, drop trailing punctuation
+            title = title.rstrip(".!?,;:").strip()
+            return title if title else "New Conversation"
         except Exception as e:
             logger.error(f"Failed to generate chat title: {e}")
-            # Fallback if the LLM call fails
             words = first_message.split()
             return " ".join(words[:5]) + ("..." if len(words) > 5 else "")
 

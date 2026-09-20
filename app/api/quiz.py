@@ -53,8 +53,9 @@ from app.services.quiz_service import (
     compute_quiz_cognitive_signals,
 )
 from app.data.database import managed_session
-from app.data.models import Student, Topic
-from app.api.deps import get_current_student
+from app.data.models.platform import User
+from app.data.models.content import Subject, Topic
+from app.api.deps import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
@@ -65,7 +66,7 @@ router = APIRouter(prefix="/quiz", tags=["Quiz"])
 @router.post("/generate", response_model=GenerateQuizResponse)
 def generate_quiz_endpoint(
     request: GenerateQuizRequest,
-    student: Student = Depends(get_current_student),
+    student: User = Depends(get_current_user),
 ):
     """
     Generates a personalised quiz (MCQ + theory) for the authenticated student.
@@ -73,12 +74,15 @@ def generate_quiz_endpoint(
     """
     try:
         with managed_session() as db:
-            metrics = get_subject_metrics(db, student.id, request.subject)
+            sub = db.query(Subject).filter(Subject.name == request.subject).first()
+            subject_id = sub.id if sub else 0
+            
+            metrics = get_subject_metrics(db, student.id, subject_id)
 
-        memory_items = get_student_memory(student.id, request.subject)
+        memory_items = get_student_memory(student.id, str(subject_id))
         memory_str = "\n".join(f"- {m}" for m in memory_items) if memory_items else "(no memory yet)"
 
-        existing_fb = get_subject_quiz_feedback(student.id, request.subject)
+        existing_fb = get_subject_quiz_feedback(student.id, subject_id)
         weak_topics = existing_fb.get("weak_topics", []) if existing_fb else []
 
         questions = generate_quiz(
@@ -96,10 +100,10 @@ def generate_quiz_endpoint(
 
         attempt_id = create_quiz_attempt(
             student_id=student.id,
-            subject=request.subject,
+            subject_id=subject_id,
             topic=request.topic,
             source=request.source,
-            session_id=request.session_id or None,
+            conversation_id=request.session_id or None,
             num_questions=len(questions),
         )
         save_quiz_questions(attempt_id, questions)
@@ -134,7 +138,7 @@ def generate_quiz_endpoint(
 @router.post("/answer", response_model=SubmitAnswerResponse)
 def submit_answer_endpoint(
     request: SubmitAnswerRequest,
-    _student: Student = Depends(get_current_student),   # auth check only
+    _student: User = Depends(get_current_user),   # auth check only
 ):
     """Submit a student's answer for a single quiz question."""
     try:
@@ -156,7 +160,7 @@ def submit_answer_endpoint(
 @router.post("/finish", response_model=FinishQuizResponse)
 def finish_quiz_endpoint(
     request: FinishQuizRequest,
-    student: Student = Depends(get_current_student),
+    student: User = Depends(get_current_user),
 ):
     """
     Finalises a quiz attempt:
@@ -169,8 +173,8 @@ def finish_quiz_endpoint(
     try:
         # 1. Score the attempt
         result    = finish_quiz_attempt(request.attempt_id)
-        student_id = result["student_id"]
-        subject   = result["subject"]
+        user_id    = result["user_id"]
+        subject_id = result["subject_id"]
         topic     = result["topic"]
         score     = result["score"]
         correct   = result["correct"]
@@ -194,8 +198,13 @@ def finish_quiz_endpoint(
         wrong_questions = [q["question"] for q in all_questions if not q.get("is_correct")]
 
         # 3. Generate AI feedback
+        # Resolve subject name for the AI feedback text
+        with managed_session() as db:
+            from app.data.models.content import Subject as SubjectModel
+            sub_row = db.query(SubjectModel).filter(SubjectModel.id == subject_id).first()
+            subject_name = sub_row.name if sub_row else str(subject_id)
         ai_feedback = generate_quiz_ai_feedback(
-            subject=subject,
+            subject=subject_name,
             topic=topic,
             class_num=student.class_num,
             score=score,
@@ -208,8 +217,8 @@ def finish_quiz_endpoint(
 
         # 4. Update cumulative subject quiz feedback record
         update_subject_quiz_feedback(
-            student_id=student_id,
-            subject=subject,
+            student_id=user_id,
+            subject_id=subject_id,
             attempt_result=result,
             questions=all_questions,
             ai_feedback=ai_feedback,
@@ -224,8 +233,8 @@ def finish_quiz_endpoint(
             passed=passed,
         )
         session_id = request.session_id or None
-        append_pending_signal(student_id, subject, session_id or "", signals)
-        metrics_applied = batch_update_cognitive_profile(student_id, subject, session_id or "")
+        append_pending_signal(user_id, subject_id, session_id or "", signals)
+        metrics_applied = batch_update_cognitive_profile(user_id, subject_id, session_id or "")
 
         # 6. Update student memory with quiz performance
         if wrong_questions:
@@ -239,7 +248,7 @@ def finish_quiz_endpoint(
                     f"Student scored {score:.0f}% on {topic} quiz. "
                     f"Needs review: {', '.join(wrong_questions[:2])}."
                 )
-                update_student_memory(student_id, subject, remark, context_snippet)
+                update_student_memory(user_id, subject_id, remark, context_snippet)
             except Exception as e:
                 logger.warning(f"Memory update after quiz failed: {e}")
 
@@ -256,9 +265,9 @@ def finish_quiz_endpoint(
 
         # 8. Increment quiz count + streak
         try:
-            increment_quiz_count(student_id, subject)
-            increment_streak_quizzes(student_id)
-            update_student_streak(student_id)
+            increment_quiz_count(user_id, subject_id)
+            increment_streak_quizzes(user_id)
+            update_student_streak(user_id)
         except Exception as e:
             logger.warning(f"Quiz count/streak update failed: {e}")
 
@@ -269,7 +278,7 @@ def finish_quiz_endpoint(
             correct=correct,
             passed=passed,
             topic=topic,
-            subject=subject,
+            subject=subject_name,
             ai_feedback=ai_feedback,
             metrics_impact=metrics_applied,
         )
@@ -284,7 +293,7 @@ def finish_quiz_endpoint(
 # ── Yesterday Context ──────────────────────────────────────────────────────────
 
 @router.get("/yesterday")
-def yesterday_context_endpoint(student: Student = Depends(get_current_student)):
+def yesterday_context_endpoint(student: User = Depends(get_current_user)):
     """Returns yesterday's session topic for the session-start assignment banner."""
     ctx = get_yesterday_session_context(student.id)
     if not ctx:
@@ -297,10 +306,15 @@ def yesterday_context_endpoint(student: Student = Depends(get_current_student)):
 @router.get("/history")
 def quiz_history_endpoint(
     subject: str | None = None,
-    student: Student = Depends(get_current_student),
+    student: User = Depends(get_current_user),
 ):
     """Returns the authenticated student's past quiz attempt summaries."""
-    history = get_quiz_history(student.id, subject)
+    subject_id = None
+    if subject:
+        with managed_session() as db:
+            sub = db.query(Subject).filter(Subject.name == subject).first()
+            subject_id = sub.id if sub else None
+    history = get_quiz_history(student.id, subject_id)
     return {"attempts": history}
 
 
@@ -309,10 +323,15 @@ def quiz_history_endpoint(
 @router.get("/feedback/{subject}", response_model=SubjectQuizFeedbackOut)
 def quiz_feedback_endpoint(
     subject: str,
-    student: Student = Depends(get_current_student),
+    student: User = Depends(get_current_user),
 ):
     """Returns the aggregated quiz feedback record for the authenticated student/subject."""
-    fb = get_subject_quiz_feedback(student.id, subject)
+    with managed_session() as db:
+        sub = db.query(Subject).filter(Subject.name == subject).first()
+        if not sub:
+            return SubjectQuizFeedbackOut()
+        subject_id = sub.id
+    fb = get_subject_quiz_feedback(student.id, subject_id)
     if not fb:
         return SubjectQuizFeedbackOut()
     return SubjectQuizFeedbackOut(**fb)

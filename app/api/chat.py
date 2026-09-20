@@ -22,9 +22,9 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ChatRequest, ChatResponse
-from app.api.deps import get_current_student
-from app.data.models import Student
+from app.schemas.chat import ChatRequest, ChatResponse
+from app.api.deps import get_current_user
+from app.data.models.platform import User
 from app.services.chat_orchestrator import chat, chat_stream
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ router = APIRouter(tags=["Chat"])
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: ChatRequest,
-    student: Student = Depends(get_current_student),
+    user: User = Depends(get_current_user),
 ):
     """
     Send a question and receive a complete tutoring response (JSON).
@@ -45,7 +45,7 @@ async def chat_endpoint(
     try:
         # Run the synchronous orchestrator in a thread pool so we don't
         # block the async event loop under concurrent load.
-        response = await asyncio.to_thread(chat, request, student)
+        response = await asyncio.to_thread(chat, request, user)
         return response
     except Exception as exc:
         logger.error(f"Chat error: {exc}", exc_info=True)
@@ -59,7 +59,7 @@ async def chat_endpoint(
 @router.post("/chat/stream")
 async def chat_stream_endpoint(
     request: ChatRequest,
-    student: Student = Depends(get_current_student),
+    user: User = Depends(get_current_user),
 ):
     """
     Send a question and receive a streaming SSE response.
@@ -73,7 +73,7 @@ async def chat_stream_endpoint(
     """
     async def _generate():
         try:
-            async for chunk in chat_stream(request, student):
+            async for chunk in chat_stream(request, user):
                 yield chunk
         except Exception as exc:
             import json

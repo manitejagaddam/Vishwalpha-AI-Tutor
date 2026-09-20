@@ -18,7 +18,8 @@ from app.config import settings
 from app.data.database import init_db
 from app.middleware import RequestTracingMiddleware, SecurityHeadersMiddleware
 
-from app.api import auth, chat, sessions, student, curriculum, admin, quiz
+from app.api import auth, student, curriculum, chat, sessions, quiz
+# from app.api import admin
 
 logger = logging.getLogger("app")
 
@@ -33,11 +34,6 @@ async def background_startup_tasks():
         logger.info("Starting background DB initialisation...")
         await asyncio.to_thread(init_db)
         logger.info("Background DB initialisation finished.")
-
-        from app.data.session_repo import cleanup_old_prompt_logs
-        logger.info("Starting background log cleanup...")
-        await asyncio.to_thread(cleanup_old_prompt_logs, days=5)
-        logger.info("Background log cleanup finished.")
     except Exception as e:
         logger.error(f"Error during background startup tasks: {e}")
 
@@ -84,8 +80,8 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(student.router)
     app.include_router(curriculum.router)
-    app.include_router(admin.router)
     app.include_router(quiz.router)
+    # app.include_router(admin.router)
 
     @app.get("/health", tags=["System"])
     def health_check():

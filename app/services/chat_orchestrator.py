@@ -4,8 +4,8 @@ app/services/chat_orchestrator.py
 Main chat pipeline: routes, retrieves, classifies, generates, and persists.
 
 Flow:
-  1. Load session / create if new
-  2. Load conversation history + student memory
+  1. Load conversation / create if new
+  2. Save student message to tree & load conversation history (linearized)
   3. Classify question: conversational vs. curriculum
   4. If curriculum → route via VectorRouter → retrieve from pgvector
   5. Generate response via TutorLLM (correct mode)
@@ -18,41 +18,33 @@ Two execution modes
   chat()        — blocking (used by sync fallback & tests)
   chat_stream() — async generator yielding SSE-compatible text chunks
                   used by the /chat/stream endpoint for real-time streaming
-
-Enhanced with:
-  - Topic mastery awareness (weak/strong topics injected into prompt)
-  - Learning preference injection
-  - Per-message analytics (response_time, sentiment, bloom_level)
-  - Student streak updates
-  - Spaced repetition review detection
-  - Single metrics DB query per request (was two)
 """
 import time
 import logging
 import asyncio
 from typing import AsyncGenerator
 
-from app.schemas import ChatRequest, ChatResponse, SourceInfo, QuizSuggestion, YesterdayContext
+from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.legacy import SourceInfo, QuizSuggestion, YesterdayContext
+from app.data.repos.conversation_repo import (
+    get_or_create_conversation,
+    save_message,
+    get_message_history,
+    update_conversation_title,
+)
 from app.data.session_repo import (
-    get_or_create_session,
-    get_history,
-    get_full_history,
-    save_turn,
-    is_new_session,
     update_session_remark,
     update_student_memory,
     get_student_memory,
     get_student_tasks,
     update_session_mood,
-    end_session,
 )
 from app.data.quiz_repo import (
     get_yesterday_session_context,
-    update_session_topic,
 )
 from app.data.database import managed_session
-from app.data.models import Student
-from app.data.auth_repo import get_student
+from app.data.models.platform import User
+from app.data.models.learning import StudentProfile
 from app.data.cognitive_repo import (
     get_subject_metrics,
     get_full_subject_profile,
@@ -103,7 +95,7 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
     if not routed_topic:
         return None
     try:
-        from app.data.models import Topic
+        from app.data.models.content import Topic
         from sqlalchemy import func
         with managed_session() as db:
             query = db.query(Topic).filter(
@@ -115,32 +107,87 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
         return None
 
 
+class Msg:
+    def __init__(self, role, content):
+        self.role = role
+        self.content = content
+
+
 # ── Shared pre-generation setup ────────────────────────────────────────────────
 
-def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
+def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     """
     Gathers all data needed before LLM generation:
-    session, history, memory, weak topics, routing, retrieval.
+    conversation tree, memory, weak topics, routing, retrieval.
     Returns a dict of everything the generator function needs.
-    Extracted to avoid duplicating logic between chat() and chat_stream().
     """
-    class_num = request.class_num or (student.class_num if student else None)
+    # In Phase 2, class_num is on the User model
+    class_num = user.class_num
+    subject_id_resolved = request.subject_id
+    
+    with managed_session() as db:
+        if subject_id_resolved is None and request.subject:
+            from app.data.models.content import Subject
+            sub = db.query(Subject).filter(Subject.name == request.subject).first()
+            if sub:
+                subject_id_resolved = sub.id
 
-    session_id = get_or_create_session(
-        student_id=student.id,
-        session_id=request.session_id,
-        class_num=class_num,
-        subject=request.subject,
-    )
+        conv = get_or_create_conversation(
+            db,
+            user_id=user.id,
+            conversation_id=request.conversation_id,
+            subject_id=subject_id_resolved,
+        )
+        conversation_id = conv.id
+        new_conversation = (conv.total_messages == 0)
 
-    new_session = is_new_session(session_id)
-    memory_summary, history = get_history(session_id)
+        # Use the conversation's subject if we didn't have one
+        if subject_id_resolved is None and conv.subject_id:
+            subject_id_resolved = conv.subject_id
+            
+        # Fallback to the first subject in the DB if somehow it's still missing 
+        # (prevents foreign key crashes for cross-subject chats until cross-subject metrics are supported)
+        if subject_id_resolved is None:
+            from app.data.models.content import Subject
+            first_sub = db.query(Subject).first()
+            if first_sub:
+                subject_id_resolved = first_sub.id
+            else:
+                subject_id_resolved = 0
+
+        # ── Per-message analytics ──────────────────────────────────────────────
+        student_sentiment = detect_sentiment(request.question)
+        student_bloom = detect_bloom_level(request.question)
+        contains_question = "?" in request.question
+
+        # ── Save Student Message Node ─────────────────────────────────────────
+        student_msg = save_message(
+            db,
+            conversation_id=conversation_id,
+            role="student",
+            content=request.question,
+            parent_message_id=request.parent_message_id,
+            idempotency_key=request.idempotency_key,
+            sentiment=student_sentiment,
+            bloom_level=student_bloom,
+            contains_question=contains_question
+        )
+        student_msg_id = student_msg.id
+
+        # ── Get History Up To This Message (Linearized) ───────────────────────
+        history_dicts = get_message_history(
+            db, 
+            conversation_id, 
+            leaf_message_id=student_msg.parent_message_id, 
+            limit=4
+        )
+        history = [Msg(h["role"], h["content"]) for h in history_dicts]
 
     # ── Yesterday context + spaced repetition reviews ─────────────────────────
     yesterday_ctx: YesterdayContext | None = None
     review_topics: list[dict] = []
-    if new_session:
-        ctx = get_yesterday_session_context(student.id)
+    if new_conversation:
+        ctx = get_yesterday_session_context(user.id)
         if ctx:
             yesterday_ctx = YesterdayContext(
                 subject=ctx["subject"],
@@ -148,29 +195,31 @@ def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
                 session_date=ctx["session_date"],
             )
         try:
-            review_topics = get_topics_due_for_review(student.id)
+            review_topics = get_topics_due_for_review(user.id)
         except Exception as e:
             logger.warning(f"Spaced repetition check failed: {e}")
 
     # ── Streak ────────────────────────────────────────────────────────────────
     try:
-        update_student_streak(student.id)
-        increment_streak_questions(student.id)
+        update_student_streak(user.id)
+        increment_streak_questions(user.id)
     except Exception as e:
         logger.warning(f"Streak update failed: {e}")
 
     # ── Student memory + learning preferences ─────────────────────────────────
-    memory_items = get_student_memory(student.id, request.subject)
+    # TODO: Migrate memory away from subjects string to subject_id
+    subject_str = str(subject_id_resolved) if subject_id_resolved else "0"
+    memory_items = get_student_memory(user.id, subject_str)
     student_memory_str = (
         "\n".join(f"- {m}" for m in memory_items)
         if memory_items else "(no memory yet)"
     )
-    learning_prefs = get_learning_preferences(student.id)
+    learning_prefs = get_learning_preferences(user.id)
 
     # ── Weak topics ───────────────────────────────────────────────────────────
     weak_topics_str = ""
     try:
-        weak_topics = get_student_weak_topics(student.id, request.subject)
+        weak_topics = get_student_weak_topics(user.id, subject_str)
         if weak_topics:
             weak_topics_str = "\n".join(
                 f"- {t['topic_title']} (mastery: {t['mastery_level']:.0f}%)"
@@ -186,11 +235,6 @@ def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
     else:
         question_type = llm.classify_question(request.question, history)
 
-    # ── Per-message analytics ─────────────────────────────────────────────────
-    student_sentiment = detect_sentiment(request.question)
-    student_bloom     = detect_bloom_level(request.question)
-    contains_question = "?" in request.question
-
     # ── Retrieval (curriculum only) ───────────────────────────────────────────
     context         = ""
     sources: list[SourceInfo] = []
@@ -202,7 +246,7 @@ def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
     if question_type == "curriculum":
         router = _get_router()
         route = router.route_query(
-            request.question, class_num=class_num, subject=request.subject
+            request.question, class_num=class_num, subject=subject_str
         )
         if route:
             routed_chapter = route.get("chapter", "")
@@ -232,10 +276,12 @@ def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
             generation_mode = "open_curriculum"
 
     return {
-        "session_id":       session_id,
-        "new_session":      new_session,
+        "conversation_id":  conversation_id,
+        "new_conversation": new_conversation,
+        "student_msg_id":   student_msg_id,
         "history":          history,
         "class_num":        class_num,
+        "subject_id":       subject_id_resolved,
         "student_memory_str": student_memory_str,
         "learning_prefs":   learning_prefs,
         "weak_topics_str":  weak_topics_str,
@@ -255,47 +301,48 @@ def _build_pipeline_context(request: ChatRequest, student: Student) -> dict:
 
 def _post_generation_pipeline(
     request: ChatRequest,
-    student: Student,
+    user: User,
     ctx: dict,
     answer: str,
     response_time_ms: int,
-) -> tuple[dict, dict, dict, int, list[str], QuizSuggestion | None]:
+) -> tuple[dict, dict, dict, int, list[str], QuizSuggestion | None, str]:
     """
     Everything after the LLM has returned an answer:
-    persist, update metrics, return (metrics, metrics_adjustments, cognitive_skills, turn_count, tasks, quiz_suggestion).
-    Extracted so both chat() and chat_stream() share identical post-processing.
+    persist, update metrics, return everything required for response.
     """
     llm           = _get_llm()
-    session_id    = ctx["session_id"]
-    new_session   = ctx["new_session"]
+    conversation_id = ctx["conversation_id"]
+    new_conversation = ctx["new_conversation"]
+    student_msg_id = ctx["student_msg_id"]
     routed_topic  = ctx["routed_topic"]
     generation_mode = ctx["generation_mode"]
     student_sentiment = ctx["student_sentiment"]
     student_bloom   = ctx["student_bloom"]
     contains_question = ctx["contains_question"]
     class_num       = ctx["class_num"]
+    subject_id_resolved = ctx["subject_id"]
+    subject_str     = str(subject_id_resolved) if subject_id_resolved else "0"
 
     # ── Generate title for new sessions (background) ──────────────────────────
-    if new_session:
+    if new_conversation:
         import threading
-        from app.data.session_repo import update_session_title
-        def _gen_title(sid: str, msg: str):
+        def _gen_title(cid, msg: str):
             try:
-                title = llm.generate_chat_title(msg)
-                if title:
-                    update_session_title(sid, title)
+                with managed_session() as db:
+                    title = llm.generate_chat_title(msg)
+                    if title:
+                        update_conversation_title(db, cid, title)
             except Exception as e:
                 logger.error(f"Failed background title generation: {e}")
         threading.Thread(
-            target=_gen_title, args=(session_id, request.question), daemon=True
+            target=_gen_title, args=(conversation_id, request.question), daemon=True
         ).start()
 
     # ── Track routed topic in session ─────────────────────────────────────────
     topic_id = None
     if routed_topic:
         try:
-            update_session_topic(session_id, routed_topic)
-            topic_id = _resolve_topic_id(routed_topic, class_num, request.subject)
+            topic_id = _resolve_topic_id(routed_topic, class_num, subject_str)
         except Exception as e:
             logger.warning(f"Failed to update session topic: {e}")
 
@@ -307,35 +354,39 @@ def _post_generation_pipeline(
             if is_complete:
                 quiz_suggestion_obj = QuizSuggestion(
                     topic=topic_name or routed_topic,
-                    subject=request.subject,
+                    subject=subject_str,
                     num_questions=7,
                 )
         except Exception as e:
             logger.warning(f"Concept completion detection failed: {e}")
 
-    # ── Persist turn ──────────────────────────────────────────────────────────
-    save_turn(
-        session_id=session_id,
-        student_msg=request.question,
-        tutor_msg=answer,
-        response_time_ms=response_time_ms,
-        student_sentiment=student_sentiment,
-        student_bloom=student_bloom,
-        student_contains_question=contains_question,
-        routed_topic=routed_topic,
-        topic_id=topic_id,
-    )
+    # ── Persist Tutor Answer Node ─────────────────────────────────────────────
+    with managed_session() as db:
+        tutor_msg = save_message(
+            db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=answer,
+            parent_message_id=student_msg_id,
+            response_time_ms=response_time_ms,
+            topic_id=topic_id
+        )
+        tutor_msg_id = tutor_msg.id
+        
+        # We can also fetch the total conversation length
+        conv = get_or_create_conversation(db, user.id, conversation_id, subject_id_resolved)
+        turn_count = conv.total_messages // 2
 
     # ── Session mood ──────────────────────────────────────────────────────────
     try:
         if student_sentiment in ("frustrated", "confused"):
-            update_session_mood(session_id, student_sentiment)
+            update_session_mood(str(conversation_id), student_sentiment)
     except Exception as e:
         logger.warning(f"Session mood update failed: {e}")
 
     # ── Cognitive signals (collect once, query metrics once) ──────────────────
     with managed_session() as db:
-        metrics = get_subject_metrics(db, student.id, request.subject)
+        metrics = get_subject_metrics(db, user.id, subject_id_resolved)
         cognitive_skills = compute_cognitive_skills(metrics)
 
     signals = collect_turn_signals(
@@ -344,47 +395,44 @@ def _post_generation_pipeline(
         question_type=generation_mode,
         metrics=metrics,
     )
-    append_pending_signal(student.id, request.subject, session_id, signals)
+    append_pending_signal(user.id, subject_id_resolved, str(conversation_id), signals)
 
     try:
-        increment_chat_turns(student.id, request.subject)
+        increment_chat_turns(user.id, subject_id_resolved)
     except Exception as e:
         logger.warning(f"Chat turn increment failed: {e}")
 
     # ── Topic mastery ─────────────────────────────────────────────────────────
     if topic_id and generation_mode == "curriculum":
         try:
-            update_topic_mastery_from_chat(student.id, topic_id, student_bloom)
+            update_topic_mastery_from_chat(user.id, topic_id, student_bloom)
         except Exception as e:
             logger.warning(f"Topic mastery update failed: {e}")
 
     # ── Batch update every N turns ────────────────────────────────────────────
-    from app.data.session_repo import get_session_message_count
-    turn_count = get_session_message_count(session_id)
     metrics_adjustments: dict = {}
-    if turn_count % BATCH_TURN_INTERVAL == 0:
+    if turn_count > 0 and turn_count % BATCH_TURN_INTERVAL == 0:
         metrics_adjustments = batch_update_cognitive_profile(
-            student.id, request.subject, session_id
+            user.id, subject_id_resolved, str(conversation_id)
         )
         context_snippet = request.question[:200] + " → " + answer[:200]
         remark = llm.generate_remark(context_snippet)
         if remark:
-            update_session_remark(session_id, remark)
-            update_student_memory(student.id, request.subject, remark, context_snippet)
+            update_session_remark(str(conversation_id), remark)
+            update_student_memory(user.id, subject_id_resolved, remark, context_snippet)
 
-    pending_tasks = get_student_tasks(student.id, request.subject)
+    pending_tasks = get_student_tasks(user.id, subject_id_resolved)
 
-    return metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj
+    return metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj, tutor_msg_id
 
 
 # ── Main orchestrator (blocking — for tests / sync callers) ───────────────────
 
-def chat(request: ChatRequest, student: Student) -> ChatResponse:
+def chat(request: ChatRequest, user: User) -> ChatResponse:
     """
     Full chat pipeline. Returns a ChatResponse ready for JSON serialisation.
-    student is the authenticated Student ORM object (resolved from JWT in the route).
     """
-    ctx = _build_pipeline_context(request, student)
+    ctx = _build_pipeline_context(request, user)
     llm = _get_llm()
 
     gen_start = time.time()
@@ -396,16 +444,17 @@ def chat(request: ChatRequest, student: Student) -> ChatResponse:
         student_memory=ctx["student_memory_str"],
         learning_preferences=ctx["learning_prefs"],
         weak_topics=ctx["weak_topics_str"],
-        review_topics=ctx["review_topics"] if ctx["new_session"] else [],
+        review_topics=ctx["review_topics"] if ctx["new_conversation"] else [],
     )
     response_time_ms = int((time.time() - gen_start) * 1000)
 
-    metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj = (
-        _post_generation_pipeline(request, student, ctx, answer, response_time_ms)
+    metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj, msg_id = (
+        _post_generation_pipeline(request, user, ctx, answer, response_time_ms)
     )
 
     return ChatResponse(
-        session_id=ctx["session_id"],
+        conversation_id=ctx["conversation_id"],
+        message_id=msg_id,
         answer=answer,
         sources=ctx["sources"],
         conversation_length=turn_count,
@@ -415,7 +464,7 @@ def chat(request: ChatRequest, student: Student) -> ChatResponse:
         metrics=metrics,
         metrics_adjustments=metrics_adjustments,
         cognitive_skills=cognitive_skills,
-        is_session_start=ctx["new_session"],
+        is_new_conversation=ctx["new_conversation"],
         pending_tasks=pending_tasks,
         quiz_suggestion=quiz_suggestion_obj,
         yesterday_context=ctx["yesterday_ctx"],
@@ -425,47 +474,28 @@ def chat(request: ChatRequest, student: Student) -> ChatResponse:
 # ── Streaming orchestrator (async generator) ──────────────────────────────────
 
 async def chat_stream(
-    request: ChatRequest, student: Student
+    request: ChatRequest, user: User
 ) -> AsyncGenerator[str, None]:
-    """
-    Async generator that yields Server-Sent Events (SSE) text chunks.
-
-    SSE event format:
-        data: <json_chunk>\n\n
-
-    Chunk types:
-        {"type": "meta",  "session_id": "...", "is_session_start": ...}
-        {"type": "token", "content": "..."}          ← streamed tokens
-        {"type": "done",  "sources": [...], ...}      ← final metadata
-
-    The frontend reads the stream and progressively renders tokens.
-    """
     import json as _json
     from app.infra.azure_openai_client import get_openai
     from app.config import settings
 
     # ── Build context (runs sync DB calls in a thread pool) ───────────────────
-    ctx = await asyncio.to_thread(_build_pipeline_context, request, student)
+    ctx = await asyncio.to_thread(_build_pipeline_context, request, user)
 
     llm = _get_llm()
 
-    # ── Emit meta event first so frontend knows session_id immediately ────────
-    yield f"data: {_json.dumps({'type': 'meta', 'session_id': ctx['session_id'], 'is_session_start': ctx['new_session']})}\n\n"
+    # ── Emit meta event first so frontend knows conversation_id immediately ───
+    yield f"data: {_json.dumps({'type': 'meta', 'conversation_id': str(ctx['conversation_id']), 'is_new_conversation': ctx['new_conversation']})}\n\n"
 
-    # ── Build messages list (same as TutorLLM.generate but streaming) ────────
     from app.services.tutor_llm import (
         _CURRICULUM_PROMPT, _OPEN_CURRICULUM_PROMPT, _CONVERSATIONAL_PROMPT,
         _build_teaching_style, _build_weak_topics_section, _build_review_section,
     )
-    system_map = {
-        "curriculum":      _CURRICULUM_PROMPT,
-        "open_curriculum": _OPEN_CURRICULUM_PROMPT,
-        "conversational":  _CONVERSATIONAL_PROMPT,
-    }
     teaching_style = _build_teaching_style(ctx["learning_prefs"] or {})
     weak_section   = _build_weak_topics_section(ctx["weak_topics_str"])
     review_section = _build_review_section(
-        ctx["review_topics"] if ctx["new_session"] else []
+        ctx["review_topics"] if ctx["new_conversation"] else []
     )
 
     mode = ctx["generation_mode"]
@@ -533,14 +563,15 @@ async def chat_stream(
     # ── Post-generation (persist, metrics, etc.) in a thread ─────────────────
     (
         metrics, metrics_adjustments, cognitive_skills,
-        turn_count, pending_tasks, quiz_suggestion_obj,
+        turn_count, pending_tasks, quiz_suggestion_obj, msg_id
     ) = await asyncio.to_thread(
-        _post_generation_pipeline, request, student, ctx, answer, response_time_ms
+        _post_generation_pipeline, request, user, ctx, answer, response_time_ms
     )
 
     # ── Final done event ──────────────────────────────────────────────────────
     done_payload = {
         "type": "done",
+        "message_id": str(msg_id),
         "sources": [s.model_dump() for s in ctx["sources"]],
         "routed_chapter":   ctx["routed_chapter"],
         "routed_topic":     ctx["routed_topic"],

@@ -1,92 +1,36 @@
 """
 app/services/retrieval_service.py
-───────────────────────────────────
-Retrieves the most relevant curriculum content from pgvector.
-
-Merges: retrieval/engine.py + retrieval/query.py + retrieval/reranker.py
-
-Pipeline:
-  1. Check Redis retrieval cache (30-day TTL for static curriculum content)
-  2. Check Redis embedding cache (7-day TTL)
-  3. Embed query via Embedder
-  4. 3-level cascading pgvector query (topic → chapter → subject)
-  5. Confidence gate (default 0.60)
-  6. Compress + return context string
+─────────────────────────────────
+Handles pgvector cosine similarity search against ContentBlock / BlockEmbedding.
+Caches queries to Redis (via Upstash) to save LLM/embedding cost on repeated questions.
 """
-import uuid
-import hashlib
+import json
 import logging
-
+from typing import Any
 from sqlalchemy import func
 
+from app.infra.azure_openai_client import get_openai
 from app.data.database import managed_session
-from app.data.models import CurriculumContent
-from app.infra.embedder import Embedder
-from app.infra.redis_cache import RetrievalCache
+from app.data.models.content import ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Module-level singletons (loaded once per process)
-_embedder: Embedder | None = None
-_cache: RetrievalCache | None = None
+def embed_text(text: str) -> list[float]:
+    client = get_openai()
+    response = client.embeddings.create(
+        input=text,
+        model=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+    )
+    return response.data[0].embedding
+from app.infra.redis_cache import RetrievalCache
 
-
-def _get_embedder() -> Embedder:
-    global _embedder
-    if _embedder is None:
-        _embedder = Embedder()
-    return _embedder
-
-
+_cache = None
 def _get_cache() -> RetrievalCache:
     global _cache
     if _cache is None:
         _cache = RetrievalCache()
     return _cache
-
-
-def upsert_chunk(metadata: dict, text: str) -> None:
-    """
-    Embeds a curriculum text chunk and upserts it into CurriculumContent.
-
-    The chunk ID is derived DETERMINISTICALLY from the content metadata
-    so that re-ingesting the same PDF updates existing rows instead of
-    creating duplicate entries. Previously used uuid4() which always
-    created new rows, causing unbounded table growth.
-    """
-    class_num = metadata.get("class", 0)
-    subject   = metadata.get("subject", "")
-    chapter   = metadata.get("chapter", "")
-    topic     = metadata.get("topic", "")
-    # Deterministic UUID: namespace = dns, name = stable content fingerprint
-    content_fingerprint = f"{class_num}::{subject}::{chapter}::{topic}::{hashlib.sha256(text.encode()).hexdigest()[:16]}"
-    point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, content_fingerprint))
-
-    vector = _get_embedder().embed_document(text)
-
-    with managed_session() as db:
-        existing = db.query(CurriculumContent).filter(
-            CurriculumContent.id == point_id
-        ).first()
-
-        if existing:
-            existing.class_num = class_num
-            existing.subject   = subject
-            existing.chapter   = chapter
-            existing.topic     = topic
-            existing.content   = text
-            existing.vector    = vector
-        else:
-            db.add(CurriculumContent(
-                id=point_id,
-                class_num=class_num,
-                subject=subject,
-                chapter=chapter,
-                topic=topic,
-                content=text,
-                vector=vector,
-            ))
 
 
 def retrieve_with_confidence(
@@ -106,20 +50,20 @@ def retrieve_with_confidence(
 
     cache = _get_cache()
 
-    # ── Cache hit check ────────────────────────────────────────────────────────
+    # ── Cache hit check ──
     cached_chunks = cache.get_chunks(question, class_num, subject)
     if cached_chunks:
         logger.info("Retrieval cache HIT")
         confident = [c for c in cached_chunks if c.get("score", 0) >= threshold]
         return _compress(confident), confident
 
-    # ── Embed (with embedding cache) ───────────────────────────────────────────
+    # ── Embed (with embedding cache) ──
     query_vector = cache.get_embedding(question)
     if query_vector is None:
-        query_vector = _get_embedder().embed_query(question)
+        query_vector = embed_text(question)
         cache.set_embedding(question, query_vector)
 
-    # ── 3-level cascade retrieval ─────────────────────────────────────────────
+    # ── 3-level cascade retrieval ──
     all_chunks = _cascade(query_vector, routing_metadata, top_k)
 
     # Cache all results (confident + not) for 30 days
@@ -148,7 +92,7 @@ def _cascade(
     top_k: int,
     min_results: int = 3,
 ) -> list[dict]:
-    """3-level cascade: topic → chapter → subject scope."""
+    """3-level cascade: topic -> chapter -> subject scope."""
     filter_levels = [
         {k: v for k, v in {
             "class_num": routing_metadata.get("class"),
@@ -182,41 +126,53 @@ def _cascade(
 def _run_query(
     query_vector: list[float], filters: dict, top_k: int
 ) -> list[dict]:
-    """Single filtered cosine-similarity query against CurriculumContent."""
+    """Single filtered cosine-similarity query against BlockEmbedding."""
     with managed_session() as db:
         try:
-            distance = CurriculumContent.vector.cosine_distance(query_vector)
-            q = db.query(CurriculumContent, (1 - distance).label("score"))
+            distance = BlockEmbedding.embedding.cosine_distance(query_vector)
+            q = db.query(ContentBlock, (1 - distance).label("score"))\
+                  .join(BlockEmbedding, ContentBlock.id == BlockEmbedding.block_id)
+
+            needs_joins = any(k in filters for k in ("subject", "chapter", "class_num", "topic"))
+            if needs_joins:
+                q = q.join(Topic, ContentBlock.topic_id == Topic.id)
+                
+            if any(k in filters for k in ("subject", "chapter", "class_num")):
+                q = q.join(Chapter, Topic.chapter_id == Chapter.id)
+                q = q.join(Book, Chapter.book_id == Book.id)
+                q = q.join(Subject, Book.subject_id == Subject.id)
+                q = q.join(SchoolClass, Subject.class_id == SchoolClass.id)
 
             if "class_num" in filters and filters["class_num"] is not None:
-                q = q.filter(CurriculumContent.class_num == filters["class_num"])
+                q = q.filter(SchoolClass.level == int(filters["class_num"]))
             if "subject" in filters:
-                q = q.filter(
-                    func.lower(CurriculumContent.subject) == filters["subject"].lower()
-                )
+                q = q.filter(func.lower(Subject.name) == str(filters["subject"]).lower())
             if "chapter" in filters:
-                q = q.filter(
-                    func.lower(CurriculumContent.chapter) == filters["chapter"].lower()
-                )
+                q = q.filter(func.lower(Chapter.title) == str(filters["chapter"]).lower())
             if "topic" in filters:
-                q = q.filter(
-                    func.lower(CurriculumContent.topic) == filters["topic"].lower()
-                )
+                q = q.filter(func.lower(Topic.title) == str(filters["topic"]).lower())
 
             rows = q.order_by(distance).limit(top_k).all()
-            return [
-                {
+            results = []
+            for r in rows:
+                block = r.ContentBlock
+                topic = db.query(Topic).filter(Topic.id == block.topic_id).first()
+                chapter = db.query(Chapter).filter(Chapter.id == topic.chapter_id).first() if topic else None
+                book = db.query(Book).filter(Book.id == chapter.book_id).first() if chapter else None
+                subject = db.query(Subject).filter(Subject.id == book.subject_id).first() if book else None
+                school_class = db.query(SchoolClass).filter(SchoolClass.id == subject.class_id).first() if subject else None
+
+                results.append({
                     "score": float(r.score) if r.score is not None else 0.0,
-                    "content": r.CurriculumContent.content,
+                    "content": block.raw_text,
                     "metadata": {
-                        "class":   r.CurriculumContent.class_num,
-                        "subject": r.CurriculumContent.subject,
-                        "chapter": r.CurriculumContent.chapter,
-                        "topic":   r.CurriculumContent.topic,
+                        "class": school_class.level if school_class else None,
+                        "subject": subject.name if subject else None,
+                        "chapter": chapter.title if chapter else None,
+                        "topic": topic.title if topic else None,
                     },
-                }
-                for r in rows
-            ]
+                })
+            return results
         except Exception as exc:
             logger.error(f"Retrieval query error: {exc}")
             return []

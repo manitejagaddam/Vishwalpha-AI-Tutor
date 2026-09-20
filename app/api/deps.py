@@ -4,27 +4,18 @@ app/api/deps.py
 FastAPI dependency injection utilities.
 
 Provides:
-  - get_current_student : Verifies the JWT Bearer token and returns the
-                          authenticated Student record.
+  - get_current_user    : Verifies the JWT Bearer access token and returns the
+                          authenticated User record.
+  - get_current_student : Alias for get_current_user for backwards compatibility.
   - require_admin       : Verifies the X-Admin-Key header for admin routes.
 
 JWT Strategy
 ────────────
-• Login / Register returns an ``access_token`` (HS256 JWT, configurable TTL).
-• All protected endpoints receive the token via ``Authorization: Bearer <token>``.
-• The token payload carries ``sub`` (student UUID), ``class_num``, ``username``.
-• No refresh-token for now — simplest viable auth for a student app.
-  Upgrade path: add refresh tokens or switch to Supabase Auth.
-
-Usage
-─────
-    from app.api.deps import get_current_student
-
-    @router.get("/protected")
-    def route(student = Depends(get_current_student)):
-        # student.id, student.class_num, student.username available
-        ...
+• Login / Register returns an `access_token` and `refresh_token`.
+• All protected endpoints receive the access token via `Authorization: Bearer <token>`.
+• The token payload carries `sub` (user UUID), `role`.
 """
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -35,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.data.database import get_db
-from app.data.models import Student
+from app.data.models.platform import User
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -46,21 +37,28 @@ _api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 # ── Token creation ─────────────────────────────────────────────────────────────
 
-def create_access_token(student: Student) -> str:
+def create_access_token(user: User) -> str:
     """
-    Creates a signed JWT access token for a student.
-    Payload: sub (student UUID), username, class_num, exp.
+    Creates a signed JWT access token.
+    Payload: sub (user UUID), role, exp.
     """
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
     )
     payload = {
-        "sub": str(student.id),
-        "username": student.username,
-        "class_num": student.class_num,
+        "sub": str(user.id),
+        "role": user.role,
         "exp": expire,
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=_ALGORITHM)
+
+
+def create_refresh_token(user: User) -> str:
+    """
+    Creates a secure refresh token string (opaque token).
+    Does NOT store it in the DB; the caller must do that.
+    """
+    return secrets.token_urlsafe(64)
 
 
 # ── Token verification ─────────────────────────────────────────────────────────
@@ -82,15 +80,15 @@ def _decode_token(token: str) -> dict:
 
 # ── FastAPI dependencies ───────────────────────────────────────────────────────
 
-def get_current_student(
+def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(_bearer)
     ] = None,
     db: Session = Depends(get_db),
-) -> Student:
+) -> User:
     """
-    FastAPI dependency — validates the Bearer JWT and returns the Student ORM row.
-    Raises 401 if the token is missing, invalid, or the student no longer exists.
+    FastAPI dependency — validates the Bearer JWT and returns the User ORM row.
+    Raises 401 if the token is missing, invalid, or the user no longer exists.
     """
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -100,16 +98,34 @@ def get_current_student(
         )
 
     payload = _decode_token(credentials.credentials)
-    student_id: str = payload["sub"]
+    user_id: str = payload["sub"]
 
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Student account not found.",
+            detail="User account not found or inactive.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return student
+    return user
+
+
+# Alias for compatibility with older routers until updated
+get_current_student = get_current_user
+
+
+def require_admin(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Dependency that ensures the authenticated user has the admin role.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required."
+        )
+    return current_user
 
 
 def verify_admin_key(
@@ -117,7 +133,7 @@ def verify_admin_key(
 ) -> str:
     """
     FastAPI dependency — validates the X-Admin-Key header.
-    Raises 403 if the key is not configured, 401 if it doesn't match.
+    (Legacy global admin key)
     """
     if not settings.ADMIN_API_KEY:
         raise HTTPException(

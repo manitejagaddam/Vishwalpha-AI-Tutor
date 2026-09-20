@@ -1,78 +1,37 @@
-
 """
 app/infra/vector_router.py
-───────────────────────────
+─────────────────────────────────
 Semantic router: maps a student question to the most relevant curriculum
-chapter/topic using pgvector cosine similarity on topic summaries.
+chapter/topic using pgvector cosine similarity on Content Blocks.
 
-Replaces: routing/router.py + routing/vector_store.py (Qdrant removed entirely).
-100% pgvector — no external vector DB needed.
+Replaces: routing/router.py + routing/vector_store.py
 """
-import uuid
 import logging
-
 from sqlalchemy import func
 
+from app.config import settings
+from app.infra.azure_openai_client import get_openai
 from app.data.database import managed_session
-from app.data.models import CurriculumRouting
-from app.infra.embedder import Embedder
+from app.data.models.content import ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass
 
 logger = logging.getLogger(__name__)
 
-_embedder: Embedder | None = None
 
-
-def _get_embedder() -> Embedder:
-    global _embedder
-    if _embedder is None:
-        _embedder = Embedder()
-    return _embedder
+def embed_text(text: str) -> list[float]:
+    client = get_openai()
+    response = client.embeddings.create(
+        input=text,
+        model=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+    )
+    return response.data[0].embedding
 
 
 class VectorRouter:
     """
     Pure pgvector semantic router.
-    Embeds the student query and finds the closest topic in curriculum_routing.
+    Embeds the student query and finds the closest topic via BlockEmbedding.
     Supports class_num + subject pre-filters to prevent cross-class leakage.
     """
-
-    def upsert_topic(
-        self,
-        class_num: int,
-        subject: str,
-        chapter: str,
-        topic: str,
-        summary: str,
-    ) -> None:
-        """Embeds a topic summary and upserts it into curriculum_routing."""
-        vector = _get_embedder().embed_document(summary)
-        point_id = str(uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            f"class_{class_num}_sub_{subject}_chap_{chapter}_top_{topic}",
-        ))
-
-        with managed_session() as db:
-            existing = db.query(CurriculumRouting).filter(
-                CurriculumRouting.id == point_id
-            ).first()
-
-            if existing:
-                existing.class_num = class_num
-                existing.subject = subject
-                existing.chapter = chapter
-                existing.topic = topic
-                existing.vector = vector
-            else:
-                db.add(CurriculumRouting(
-                    id=point_id,
-                    class_num=class_num,
-                    subject=subject,
-                    chapter=chapter,
-                    topic=topic,
-                    vector=vector,
-                ))
-            logger.debug(f"Upserted routing vector: {chapter} / {topic}")
-
     def route_query(
         self,
         query: str,
@@ -83,33 +42,36 @@ class VectorRouter:
         Embeds the query and returns the best-matching curriculum topic metadata,
         or None if no routing result is found.
 
-        Pre-filters by class_num and subject BEFORE cosine sort to prevent
-        cross-class content leakage. Falls back to global search if scoped
-        search returns nothing.
+        Pre-filters by class_num and subject BEFORE cosine sort.
         """
-        query_vector = _get_embedder().embed_query(query)
+        query_vector = embed_text(query)
 
         with managed_session() as db:
-            distance = CurriculumRouting.vector.cosine_distance(query_vector)
-            q = db.query(CurriculumRouting, (1 - distance).label("score"))
+            distance = BlockEmbedding.embedding.cosine_distance(query_vector)
+            q = db.query(ContentBlock, (1 - distance).label("score"))\
+                  .join(BlockEmbedding, ContentBlock.id == BlockEmbedding.block_id)\
+                  .join(Topic, ContentBlock.topic_id == Topic.id)\
+                  .join(Chapter, Topic.chapter_id == Chapter.id)\
+                  .join(Book, Chapter.book_id == Book.id)\
+                  .join(Subject, Book.subject_id == Subject.id)\
+                  .join(SchoolClass, Subject.class_id == SchoolClass.id)
 
             if class_num is not None:
-                q = q.filter(CurriculumRouting.class_num == class_num)
+                q = q.filter(SchoolClass.level == int(class_num))
             if subject is not None:
-                q = q.filter(
-                    func.lower(CurriculumRouting.subject) == subject.lower()
-                )
+                q = q.filter(func.lower(Subject.name) == subject.lower())
 
             results = q.order_by(distance).limit(1).all()
 
-            # Fallback: scoped search empty → try global
+            # Fallback: scoped search empty -> try global
             if not results and (class_num is not None or subject is not None):
                 logger.warning(
                     f"Scoped routing found nothing for class={class_num}, "
                     f"subject={subject}. Falling back to global search."
                 )
                 results = (
-                    db.query(CurriculumRouting, (1 - distance).label("score"))
+                    db.query(ContentBlock, (1 - distance).label("score"))
+                    .join(BlockEmbedding, ContentBlock.id == BlockEmbedding.block_id)
                     .order_by(distance)
                     .limit(1)
                     .all()
@@ -119,15 +81,31 @@ class VectorRouter:
                 return None
 
             row = results[0]
+            block = row.ContentBlock
+            
+            # Re-fetch topic/chapter/subject for global fallback (or just use lazy loading)
+            topic_obj = db.query(Topic).filter(Topic.id == block.topic_id).first()
+            if not topic_obj:
+                return None
+            chapter_obj = db.query(Chapter).filter(Chapter.id == topic_obj.chapter_id).first()
+            if not chapter_obj:
+                return None
+            book_obj = db.query(Book).filter(Book.id == chapter_obj.book_id).first()
+            if not book_obj:
+                return None
+            subject_obj = db.query(Subject).filter(Subject.id == book_obj.subject_id).first()
+            if not subject_obj:
+                return None
+
             route = {
-                "class":   row.CurriculumRouting.class_num,
-                "subject": row.CurriculumRouting.subject,
-                "chapter": row.CurriculumRouting.chapter,
-                "topic":   row.CurriculumRouting.topic,
+                "class":   subject_obj.school_class.level if subject_obj.school_class else class_num,
+                "subject": subject_obj.name,
+                "chapter": chapter_obj.title,
+                "topic":   topic_obj.title,
                 "score":   float(row.score) if row.score else 0.0,
             }
             logger.info(
-                f"Routed → Class {route['class']} | {route['subject']} | "
+                f"Routed -> Class {route['class']} | {route['subject']} | "
                 f"{route['chapter']} | {route['topic']} (score={route['score']:.3f})"
             )
             return route
