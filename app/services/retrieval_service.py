@@ -8,8 +8,10 @@ import json
 import logging
 from typing import Any
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 from app.infra.azure_openai_client import get_openai
+from app.infra.redis_cache import RetrievalCache
 from app.data.database import managed_session
 from app.data.models.content import ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass
 from app.config import settings
@@ -23,7 +25,6 @@ def embed_text(text: str) -> list[float]:
         model=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
     )
     return response.data[0].embedding
-from app.infra.redis_cache import RetrievalCache
 
 _cache = None
 def _get_cache() -> RetrievalCache:
@@ -95,17 +96,20 @@ def _cascade(
     """3-level cascade: topic -> chapter -> subject scope."""
     filter_levels = [
         {k: v for k, v in {
+            "board_id":  routing_metadata.get("board_id"),
             "class_num": routing_metadata.get("class"),
             "subject":   routing_metadata.get("subject"),
             "chapter":   routing_metadata.get("chapter"),
             "topic":     routing_metadata.get("topic"),
         }.items() if v is not None},
         {k: v for k, v in {
+            "board_id":  routing_metadata.get("board_id"),
             "class_num": routing_metadata.get("class"),
             "subject":   routing_metadata.get("subject"),
             "chapter":   routing_metadata.get("chapter"),
         }.items() if v is not None},
         {k: v for k, v in {
+            "board_id":  routing_metadata.get("board_id"),
             "class_num": routing_metadata.get("class"),
             "subject":   routing_metadata.get("subject"),
         }.items() if v is not None},
@@ -130,19 +134,33 @@ def _run_query(
     with managed_session() as db:
         try:
             distance = BlockEmbedding.embedding.cosine_distance(query_vector)
-            q = db.query(ContentBlock, (1 - distance).label("score"))\
-                  .join(BlockEmbedding, ContentBlock.id == BlockEmbedding.block_id)
+            q = db.query(
+                ContentBlock,
+                (1 - distance).label("score"),
+                Topic, Chapter, Book, Subject, SchoolClass,
+            ).join(BlockEmbedding, ContentBlock.id == BlockEmbedding.block_id)
 
-            needs_joins = any(k in filters for k in ("subject", "chapter", "class_num", "topic"))
+            needs_joins = any(k in filters for k in ("subject", "chapter", "class_num", "topic", "board_id"))
             if needs_joins:
                 q = q.join(Topic, ContentBlock.topic_id == Topic.id)
-                
-            if any(k in filters for k in ("subject", "chapter", "class_num")):
+
+            if any(k in filters for k in ("subject", "chapter", "class_num", "board_id")):
                 q = q.join(Chapter, Topic.chapter_id == Chapter.id)
                 q = q.join(Book, Chapter.book_id == Book.id)
                 q = q.join(Subject, Book.subject_id == Subject.id)
                 q = q.join(SchoolClass, Subject.class_id == SchoolClass.id)
+            else:
+                # Always join for metadata enrichment even when no filter applied
+                q = (q
+                     .join(Topic, ContentBlock.topic_id == Topic.id)
+                     .join(Chapter, Topic.chapter_id == Chapter.id)
+                     .join(Book, Chapter.book_id == Book.id)
+                     .join(Subject, Book.subject_id == Subject.id)
+                     .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                     )
 
+            if "board_id" in filters and filters["board_id"] is not None:
+                q = q.filter(SchoolClass.board_id == int(filters["board_id"]))
             if "class_num" in filters and filters["class_num"] is not None:
                 q = q.filter(SchoolClass.level == int(filters["class_num"]))
             if "subject" in filters:
@@ -155,21 +173,20 @@ def _run_query(
             rows = q.order_by(distance).limit(top_k).all()
             results = []
             for r in rows:
-                block = r.ContentBlock
-                topic = db.query(Topic).filter(Topic.id == block.topic_id).first()
-                chapter = db.query(Chapter).filter(Chapter.id == topic.chapter_id).first() if topic else None
-                book = db.query(Book).filter(Book.id == chapter.book_id).first() if chapter else None
-                subject = db.query(Subject).filter(Subject.id == book.subject_id).first() if book else None
-                school_class = db.query(SchoolClass).filter(SchoolClass.id == subject.class_id).first() if subject else None
+                block        = r.ContentBlock
+                topic_obj    = r.Topic
+                chapter_obj  = r.Chapter
+                subject_obj  = r.Subject
+                cls_obj      = r.SchoolClass
 
                 results.append({
                     "score": float(r.score) if r.score is not None else 0.0,
                     "content": block.raw_text,
                     "metadata": {
-                        "class": school_class.level if school_class else None,
-                        "subject": subject.name if subject else None,
-                        "chapter": chapter.title if chapter else None,
-                        "topic": topic.title if topic else None,
+                        "class":   cls_obj.level     if cls_obj     else None,
+                        "subject": subject_obj.name  if subject_obj else None,
+                        "chapter": chapter_obj.title if chapter_obj else None,
+                        "topic":   topic_obj.title   if topic_obj   else None,
                     },
                 })
             return results

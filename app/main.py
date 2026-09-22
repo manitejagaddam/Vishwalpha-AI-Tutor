@@ -18,8 +18,7 @@ from app.config import settings
 from app.data.database import init_db
 from app.middleware import RequestTracingMiddleware, SecurityHeadersMiddleware
 
-from app.api import auth, student, curriculum, chat, sessions, quiz
-# from app.api import admin
+from app.api import auth, student, curriculum, chat, sessions, quiz, admin
 
 logger = logging.getLogger("app")
 
@@ -81,7 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(student.router)
     app.include_router(curriculum.router)
     app.include_router(quiz.router)
-    # app.include_router(admin.router)
+    app.include_router(admin.router)
 
     @app.get("/health", tags=["System"])
     def health_check():

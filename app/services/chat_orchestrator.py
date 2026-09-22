@@ -123,6 +123,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     """
     # In Phase 2, class_num is on the User model
     class_num = user.class_num
+    board_id = user.profile.board_id if user.profile else None
     subject_id_resolved = request.subject_id
     
     with managed_session() as db:
@@ -207,9 +208,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         logger.warning(f"Streak update failed: {e}")
 
     # ── Student memory + learning preferences ─────────────────────────────────
-    # TODO: Migrate memory away from subjects string to subject_id
-    subject_str = str(subject_id_resolved) if subject_id_resolved else "0"
-    memory_items = get_student_memory(user.id, subject_str)
+    memory_items = get_student_memory(user.id, subject_id_resolved)
     student_memory_str = (
         "\n".join(f"- {m}" for m in memory_items)
         if memory_items else "(no memory yet)"
@@ -219,7 +218,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     # ── Weak topics ───────────────────────────────────────────────────────────
     weak_topics_str = ""
     try:
-        weak_topics = get_student_weak_topics(user.id, subject_str)
+        weak_topics = get_student_weak_topics(user.id, subject_id_resolved)
         if weak_topics:
             weak_topics_str = "\n".join(
                 f"- {t['topic_title']} (mastery: {t['mastery_level']:.0f}%)"
@@ -246,7 +245,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     if question_type == "curriculum":
         router = _get_router()
         route = router.route_query(
-            request.question, class_num=class_num, subject=subject_str
+            request.question, class_num=class_num, subject_id=subject_id_resolved, board_id=board_id
         )
         if route:
             routed_chapter = route.get("chapter", "")
@@ -445,6 +444,8 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         learning_preferences=ctx["learning_prefs"],
         weak_topics=ctx["weak_topics_str"],
         review_topics=ctx["review_topics"] if ctx["new_conversation"] else [],
+        user_id=str(user.id),
+        conversation_id=str(ctx["conversation_id"]),
     )
     response_time_ms = int((time.time() - gen_start) * 1000)
 
@@ -542,7 +543,7 @@ async def chat_stream(
                 messages=messages,
                 model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
                 temperature=temp,
-                max_completion_tokens=max_tok,
+                max_tokens=max_tok,
                 stream=True,
             )
         )

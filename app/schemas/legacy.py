@@ -4,6 +4,7 @@ app/schemas.py
 All Pydantic request/response schemas for the API.
 """
 from typing import Optional
+from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -122,12 +123,28 @@ class IngestRequest(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    status:            str
-    sections_ingested: int = 0
-    blocks_stored:     int = 0
-    chapter_id:        Optional[int] = None
-    message:           str = ""
-    warnings:          list[str] = []
+    status:               str
+    sections_ingested:    int = 0
+    blocks_stored:        int = 0
+    chapter_id:           Optional[int] = None
+    message:              str = ""
+    warnings:             list[str] = []
+    ingestion_confidence: Optional[float] = None
+    coverage:             dict = {}
+
+
+class IngestLogResponse(BaseModel):
+    id:                   int
+    book_id:              int
+    book_natural_key:     str | None = None
+    chapter_number:       int | None = None
+    pdf_hash:             str
+    status:               str
+    ingestion_confidence: float | None = None
+    coverage:             dict | None = None
+    error:                str | None = None
+    ingested_at:          datetime
+    finished_at:          datetime | None = None
 
 
 # ── Curriculum schemas (internal) ─────────────────────────────────────────────

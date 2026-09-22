@@ -16,8 +16,12 @@ Enhanced with:
 """
 import json
 import logging
+import time
 from app.infra.azure_openai_client import get_openai
 from app.config import settings
+from app.services.ab_testing import get_active_prompt
+from app.data.database import managed_session
+from app.data.models.platform_ops import LLMCallLog
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +183,8 @@ class TutorLLM:
         learning_preferences: dict | None = None,
         weak_topics: str = "",
         review_topics: list[dict] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Generates a tutor response.
@@ -206,7 +212,14 @@ class TutorLLM:
         weak_section = _build_weak_topics_section(weak_topics)
         review_section = _build_review_section(review_topics or [])
 
-        system_template = system_map.get(mode, _OPEN_CURRICULUM_PROMPT)
+        # ── A/B Testing ───────────────────────────────────────────────────────
+        experiment_name = f"{mode}_prompt"
+        ab_template, ab_exp_id = None, None
+        if user_id:
+            ab_template, ab_exp_id = get_active_prompt(experiment_name, str(user_id))
+
+        system_template = ab_template if ab_template else system_map.get(mode, _OPEN_CURRICULUM_PROMPT)
+        
         system_content = system_template.format(
             context=context or "(no additional context)",
             student_memory=student_memory or "(no memory yet)",
@@ -238,7 +251,7 @@ class TutorLLM:
             messages=messages,
             model=self.model,
             temperature=temp,
-            max_completion_tokens=max_tok,
+            max_tokens=max_tok,
         )
 
         answer = response.choices[0].message.content.strip()
@@ -266,7 +279,7 @@ Answer with ONLY one word: 'curriculum' or 'conversational'"""
             messages=[{"role": "user", "content": prompt}],
             model=self.model,
             temperature=0.0,
-            max_completion_tokens=5,
+            max_tokens=5,
         )
         raw = response.choices[0].message.content.strip().lower()
         return "curriculum" if "curriculum" in raw else "conversational"
@@ -288,7 +301,7 @@ Answer with ONLY one word: 'curriculum' or 'conversational'"""
             response = client.chat.completions.create(
                 model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
                 messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=20,
+                max_tokens=20,
                 temperature=0.2,
             )
             title = response.choices[0].message.content.strip().strip('"').strip("'")
@@ -314,7 +327,7 @@ Session summary:
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 temperature=0.4,
-                max_completion_tokens=150,
+                max_tokens=150,
             )
             return response.choices[0].message.content.strip()
         except Exception as exc:

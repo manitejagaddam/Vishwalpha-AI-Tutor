@@ -31,26 +31,24 @@ def update_session_mood(session_id: str, mood: str) -> None:
     # Deprecated: Conversations no longer store mood directly
     pass
 
-def get_student_memory(student_id: str, subject_id: str) -> list[str]:
+def get_student_memory(student_id: str, subject_id: int | None = None) -> list[str]:
     with managed_session() as db:
         records = db.query(StudentMemoryItem).filter(
             StudentMemoryItem.user_id == student_id,
-            StudentMemoryItem.subject_id == (int(subject_id) if str(subject_id).isdigit() else None),
+            StudentMemoryItem.subject_id == subject_id,
             StudentMemoryItem.is_active == True,
         ).all()
         return [r.fact for r in records]
 
 def update_student_memory(
     student_id: str,
-    subject_id: str,
+    subject_id: int | None,
     remark: str,
     context: str,
 ) -> None:
     """Uses an LLM to merge new observations into the persistent memory list."""
     existing = get_student_memory(student_id, subject_id)
     existing_str = "\n".join(f"- {m}" for m in existing) if existing else "(none yet)"
-    
-    sub_id_int = int(subject_id) if str(subject_id).isdigit() else None
 
     try:
         client = get_openai()
@@ -65,7 +63,7 @@ def update_student_memory(
             }],
             model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.2,
-            max_completion_tokens=300,
+            max_tokens=300,
         )
         raw = resp.choices[0].message.content.strip()
         # Extract JSON array
@@ -79,7 +77,7 @@ def update_student_memory(
         # Delete old active memories for this subject/user to replace them
         db.query(StudentMemoryItem).filter(
             StudentMemoryItem.user_id == student_id,
-            StudentMemoryItem.subject_id == sub_id_int,
+            StudentMemoryItem.subject_id == subject_id,
         ).delete()
         
         # Insert new updated facts
@@ -88,16 +86,15 @@ def update_student_memory(
                 if isinstance(fact, str) and fact.strip():
                     db.add(StudentMemoryItem(
                         user_id=student_id,
-                        subject_id=sub_id_int,
+                        subject_id=subject_id,
                         fact=fact.strip(),
                     ))
 
-def get_student_tasks(student_id: str, subject_id: str) -> list[str]:
-    sub_id_int = int(subject_id) if str(subject_id).isdigit() else None
+def get_student_tasks(student_id: str, subject_id: int | None = None) -> list[str]:
     with managed_session() as db:
         tasks = db.query(StudentTask).filter(
             StudentTask.user_id == student_id,
-            StudentTask.subject_id == sub_id_int,
+            StudentTask.subject_id == subject_id,
             StudentTask.is_done == False,
         ).order_by(StudentTask.created_at.desc()).limit(5).all()
         return [t.task for t in tasks]

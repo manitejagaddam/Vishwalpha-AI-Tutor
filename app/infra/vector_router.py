@@ -36,13 +36,14 @@ class VectorRouter:
         self,
         query: str,
         class_num: int | None = None,
-        subject: str | None = None,
+        subject_id: int | None = None,
+        board_id: int | None = None,
     ) -> dict | None:
         """
         Embeds the query and returns the best-matching curriculum topic metadata,
         or None if no routing result is found.
 
-        Pre-filters by class_num and subject BEFORE cosine sort.
+        Pre-filters by board_id, class_num and subject_id BEFORE cosine sort.
         """
         query_vector = embed_text(query)
 
@@ -56,18 +57,20 @@ class VectorRouter:
                   .join(Subject, Book.subject_id == Subject.id)\
                   .join(SchoolClass, Subject.class_id == SchoolClass.id)
 
+            if board_id is not None:
+                q = q.filter(SchoolClass.board_id == int(board_id))
             if class_num is not None:
                 q = q.filter(SchoolClass.level == int(class_num))
-            if subject is not None:
-                q = q.filter(func.lower(Subject.name) == subject.lower())
+            if subject_id is not None:
+                q = q.filter(Subject.id == subject_id)
 
             results = q.order_by(distance).limit(1).all()
 
             # Fallback: scoped search empty -> try global
-            if not results and (class_num is not None or subject is not None):
+            if not results and (class_num is not None or subject_id is not None or board_id is not None):
                 logger.warning(
-                    f"Scoped routing found nothing for class={class_num}, "
-                    f"subject={subject}. Falling back to global search."
+                    f"Scoped routing found nothing for board={board_id}, class={class_num}, "
+                    f"subject_id={subject_id}. Falling back to global search."
                 )
                 results = (
                     db.query(ContentBlock, (1 - distance).label("score"))
@@ -96,16 +99,19 @@ class VectorRouter:
             subject_obj = db.query(Subject).filter(Subject.id == book_obj.subject_id).first()
             if not subject_obj:
                 return None
+            # Explicitly load SchoolClass to avoid DetachedInstanceError from lazy ORM traversal
+            school_class_obj = db.query(SchoolClass).filter(SchoolClass.id == subject_obj.class_id).first()
 
             route = {
-                "class":   subject_obj.school_class.level if subject_obj.school_class else class_num,
+                "board_id": school_class_obj.board_id if school_class_obj else board_id,
+                "class":   school_class_obj.level    if school_class_obj else class_num,
                 "subject": subject_obj.name,
                 "chapter": chapter_obj.title,
                 "topic":   topic_obj.title,
                 "score":   float(row.score) if row.score else 0.0,
             }
             logger.info(
-                f"Routed -> Class {route['class']} | {route['subject']} | "
+                f"Routed -> Board {route['board_id']} | Class {route['class']} | {route['subject']} | "
                 f"{route['chapter']} | {route['topic']} (score={route['score']:.3f})"
             )
             return route

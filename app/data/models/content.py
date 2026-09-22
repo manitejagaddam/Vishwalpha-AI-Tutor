@@ -151,12 +151,15 @@ class Topic(Base):
     topic_number   = Column(String(50), nullable=True)       # "3.2", "Ex 3.2" etc.
     natural_key    = Column(String(300), nullable=False, unique=True)
     summary        = Column(Text, nullable=True)
+    content_type   = Column(String(50), nullable=True)       # 'concept' | 'activity' | 'example' etc.
+    difficulty_level = Column(String(50), nullable=True)     # 'foundational' | 'intermediate' | 'advanced'
     display_order  = Column(Integer, nullable=False, default=0)
     prompt_version = Column(String(20), nullable=True)
 
     chapter      = relationship("Chapter", back_populates="topics")
     subtopics    = relationship("Subtopic", back_populates="topic", cascade="all, delete-orphan")
     blocks       = relationship("ContentBlock", back_populates="topic", cascade="all, delete-orphan")
+    activities   = relationship("Activity", back_populates="topic", cascade="all, delete-orphan")
     prerequisites_from = relationship(
         "TopicPrerequisite",
         foreign_keys="TopicPrerequisite.topic_id",
@@ -183,6 +186,28 @@ class Subtopic(Base):
 
     topic  = relationship("Topic", back_populates="subtopics")
     blocks = relationship("ContentBlock", back_populates="subtopic")
+
+
+class Activity(Base):
+    """
+    An activity or experiment extracted from the textbook.
+    Attached to a Topic so we can provide it for practical understanding.
+    """
+    __tablename__ = "activities"
+    __table_args__ = (
+        Index("idx_activities_topic_id", "topic_id"),
+    )
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    topic_id      = Column(Integer, ForeignKey("topics.id", ondelete="CASCADE"), nullable=False)
+    title         = Column(String(300), nullable=False)
+    content       = Column(Text, nullable=False)             # repaired_text
+    summary       = Column(Text, nullable=True)
+    keywords      = Column(JSONB, nullable=True)
+    difficulty_level = Column(String(50), nullable=True)
+    created_at    = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    topic = relationship("Topic", back_populates="activities")
 
 
 class ContentBlock(Base):

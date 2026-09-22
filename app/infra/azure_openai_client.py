@@ -19,7 +19,7 @@ def get_openai() -> AzureOpenAI:
     return AzureOpenAI(
         api_key=settings.AZURE_OPENAI_API_KEY,
         azure_endpoint="https://viswalpha-foundry-50bd.openai.azure.com/",
-        api_version="2024-02-15-preview",
+        api_version="2024-10-01-preview",  # supports max_tokens, json_object, tool_choice
         timeout=30.0,
         max_retries=2,
     )

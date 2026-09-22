@@ -30,9 +30,12 @@ def list_sessions(
 
     convos = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
-        Conversation.subject_id == sub_id,
         Conversation.is_deleted == False
-    ).order_by(Conversation.updated_at.desc()).all()
+    )
+    # Only filter by subject if we found a matching subject in DB
+    if sub_id is not None:
+        convos = convos.filter(Conversation.subject_id == sub_id)
+    convos = convos.order_by(Conversation.updated_at.desc()).all()
     
     res = []
     for c in convos:
@@ -109,7 +112,7 @@ def session_remark(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     
-    return {"remark": "Keep up the good work on this topic!"}
+    return {"remark": getattr(session, "remark", "") or ""}
 
 
 # ── Title Management ──────────────────────────────────────────────────────────
@@ -191,7 +194,7 @@ def generate_title(
         resp = client.chat.completions.create(
             model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=20,
+            max_tokens=20,
             temperature=0.3,
         )
         title = resp.choices[0].message.content.strip().strip('"').strip("'")[:120]

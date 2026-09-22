@@ -148,7 +148,7 @@ def generate_quiz(
             messages=[{"role": "user", "content": prompt}],
             model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.6,
-            max_completion_tokens=3000,
+            max_tokens=3000,
         )
         raw = resp.choices[0].message.content.strip()
 
@@ -260,7 +260,7 @@ def generate_quiz_ai_feedback(
             messages=[{"role": "user", "content": prompt}],
             model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             temperature=0.4,
-            max_completion_tokens=200,
+            max_tokens=200,
         )
         return resp.choices[0].message.content.strip()
     except Exception as exc:

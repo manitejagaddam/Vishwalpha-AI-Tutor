@@ -23,6 +23,23 @@ from sqlalchemy.sql import func
 from app.data.models.base import Base
 
 
+class ABExperiment(Base):
+    """
+    Configuration for A/B prompt experiments.
+    Determines which variant of a prompt a user sees based on deterministic hashing.
+    """
+    __tablename__ = "ab_experiments"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    name               = Column(String(100), nullable=False, unique=True, index=True)
+    variant_a_template = Column(Text, nullable=False)
+    variant_b_template = Column(Text, nullable=False)
+    traffic_split      = Column(Integer, nullable=False, default=50) # % assigned to variant A
+    is_active          = Column(Boolean, nullable=False, default=True)
+    created_at         = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at         = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class LLMCallLog(Base):
     """
     Audit record for every LLM API call made by the backend.
@@ -52,6 +69,7 @@ class LLMCallLog(Base):
     deployment      = Column(String(100), nullable=False)
     prompt_template = Column(String(100), nullable=True, default="ad_hoc")
     prompt_version  = Column(Integer, nullable=True)
+    ab_experiment_id= Column(Integer, ForeignKey("ab_experiments.id", ondelete="SET NULL"), nullable=True)
     input_tokens    = Column(Integer, nullable=False, default=0)
     output_tokens   = Column(Integer, nullable=False, default=0)
     cost_usd        = Column(Float, nullable=False, default=0.0)
