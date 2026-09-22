@@ -143,6 +143,10 @@ class RetrievalCache:
 
     def invalidate_chapter(self, class_num, subject: str) -> int:
         """Clears all retrieval cache keys for a class+subject after re-ingestion."""
+        return self.invalidate_subject(class_num, subject)
+
+    def invalidate_subject(self, class_num, subject: str) -> int:
+        """Clears all retrieval cache keys for a class+subject after re-ingestion."""
         if not self._client:
             return 0
         try:
@@ -150,8 +154,32 @@ class RetrievalCache:
             keys = self._client.keys(pattern)
             if keys:
                 self._client.delete(*keys)
-            logger.info(f"Cache invalidated {len(keys)} keys for class={class_num}, subject={subject}")
+            logger.info(
+                f"Cache invalidated {len(keys)} keys for class={class_num}, subject={subject}"
+            )
             return len(keys)
         except Exception as exc:
             logger.warning(f"Cache invalidation error: {exc}")
             return 0
+
+    # ── Layer 4: Ingestion structuring cache ───────────────────────────────────
+    # Caches LLM _structure_chunk() results by MD5 of (chapter+text).
+    # Avoids re-calling the LLM for identical PDF content on re-ingestion.
+
+    _INGEST_STRUCT_TTL = 60 * 60 * 24 * 30  # 30 days
+
+    def get_ingest_struct(self, cache_key: str) -> dict | None:
+        raw = self._safe_get(f"ingest:struct:{cache_key}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_ingest_struct(self, cache_key: str, data: dict) -> None:
+        self._safe_setex(
+            f"ingest:struct:{cache_key}",
+            self._INGEST_STRUCT_TTL,
+            json.dumps(data),
+        )

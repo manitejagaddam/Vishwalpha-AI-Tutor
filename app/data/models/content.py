@@ -206,14 +206,17 @@ class ContentBlock(Base):
     id               = Column(Integer, primary_key=True, autoincrement=True)
     topic_id         = Column(Integer, ForeignKey("topics.id", ondelete="CASCADE"), nullable=False)
     subtopic_id      = Column(Integer, ForeignKey("subtopics.id", ondelete="SET NULL"), nullable=True)
-    block_type       = Column(String(30), nullable=False, default="text")
-    raw_text         = Column(Text, nullable=False)          # verbatim — NEVER LLM paraphrase
-    enriched_summary = Column(Text, nullable=True)           # LLM-generated summary
-    enriched_keywords = Column(JSONB, nullable=True)         # LLM-generated keyword list
-    page_num         = Column(Integer, nullable=True)
-    block_index      = Column(Integer, nullable=False, default=0)
-    prompt_version   = Column(String(20), nullable=True)     # which prompt built enriched_*
-    created_at       = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    block_type              = Column(String(30), nullable=False, default="text")
+    raw_text                = Column(Text, nullable=False)          # verbatim — NEVER LLM paraphrase
+    enriched_summary        = Column(Text, nullable=True)           # LLM-generated summary
+    enriched_keywords       = Column(JSONB, nullable=True)          # LLM-generated keyword list
+    enriched_prerequisites  = Column(JSONB, nullable=True)          # LLM-extracted prerequisite topics
+    page_num                = Column(Integer, nullable=True)
+    block_index             = Column(Integer, nullable=False, default=0)
+    ocr_confidence          = Column(Float, nullable=True)          # avg OCR confidence (NULL if digital)
+    content_hash            = Column(String(32), nullable=True)     # MD5 of raw_text for dedup
+    prompt_version          = Column(String(20), nullable=True)     # which prompt built enriched_*
+    created_at              = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     topic    = relationship("Topic", back_populates="blocks")
     subtopic = relationship("Subtopic", back_populates="blocks")
@@ -257,14 +260,19 @@ class BookIngestionLog(Base):
         Index("idx_ingestion_log_pdf_hash", "pdf_hash"),
     )
 
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    book_id     = Column(Integer, ForeignKey("books.id", ondelete="CASCADE"), nullable=False)
-    pdf_hash    = Column(String(64), nullable=False)    # SHA256 hex
-    status      = Column(String(20), nullable=False, default="pending")
-    coverage    = Column(JSONB, nullable=True)           # per-chapter coverage report
-    error       = Column(Text, nullable=True)
-    ingested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    finished_at = Column(DateTime(timezone=True), nullable=True)
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    book_id              = Column(Integer, ForeignKey("books.id", ondelete="CASCADE"), nullable=False)
+    pdf_hash             = Column(String(64), nullable=False)    # SHA256 hex
+    chapter_number       = Column(Integer, nullable=True)        # which chapter this run covers
+    mime_type            = Column(String(50), nullable=True)     # detected MIME type
+    page_count           = Column(Integer, nullable=True)        # total pages in PDF
+    status               = Column(String(20), nullable=False, default="pending")
+    # valid statuses: pending | in_progress | complete | partial | needs_review | failed
+    coverage             = Column(JSONB, nullable=True)          # full coverage report JSON
+    ingestion_confidence = Column(Float, nullable=True)          # overall pipeline confidence 0-1
+    error                = Column(Text, nullable=True)
+    ingested_at          = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at          = Column(DateTime(timezone=True), nullable=True)
 
     book = relationship("Book")
 

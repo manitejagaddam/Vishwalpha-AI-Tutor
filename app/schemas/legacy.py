@@ -111,16 +111,23 @@ class UpdateMetricsRequest(BaseModel):
 # ── Ingestion (admin) ─────────────────────────────────────────────────────────
 
 class IngestRequest(BaseModel):
-    pdf_path:  str = Field(description="Path to PDF relative to the server's DataSet/ directory")
-    class_num: int = Field(ge=6, le=12)
-    subject:   str
-    chapter:   str
+    pdf_path:         str = Field(description="Path to PDF file (absolute or relative to project root)")
+    board_name:       str = Field(default="NCERT", description="Board name, e.g. NCERT")
+    class_num:        int = Field(ge=6, le=12)
+    subject_name:     str = Field(description="Subject name, e.g. Science")
+    book_title:       str = Field(description="Full book title")
+    book_natural_key: str = Field(description="Unique book key, e.g. NCERT_10_Science_en_2023")
+    chapter_title:    str = Field(description="Chapter title")
+    chapter_number:   int = Field(ge=1, description="Chapter number")
 
 
 class IngestResponse(BaseModel):
     status:            str
-    sections_ingested: int
+    sections_ingested: int = 0
+    blocks_stored:     int = 0
+    chapter_id:        Optional[int] = None
     message:           str = ""
+    warnings:          list[str] = []
 
 
 # ── Curriculum schemas (internal) ─────────────────────────────────────────────

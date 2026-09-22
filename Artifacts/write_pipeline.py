@@ -1,4 +1,5 @@
-"""
+
+PIPELINE_CODE = r'''"""
 app/services/ingestion_pipeline.py
 ------------------------------------
 Full Trust Pipeline - 17 stages.
@@ -1087,3 +1088,9 @@ class IngestionPipeline:
                     log.finished_at = datetime.now(timezone.utc)
         except Exception as exc:
             logger.warning(f"[Ingestion] BookIngestionLog update failed: {exc}")
+'''
+
+import pathlib, sys
+target = pathlib.Path(r"c:\Users\manit\OneDrive\Desktop\code\Vishwalpha\AI Tutor\app\services\ingestion_pipeline.py")
+target.write_text(PIPELINE_CODE, encoding="utf-8")
+print(f"Written {target.stat().st_size:,} bytes to {target}")
