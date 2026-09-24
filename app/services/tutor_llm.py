@@ -470,3 +470,77 @@ Conversation:
         except Exception as exc:
             logger.warning(f"LLM metric signal generation failed: {exc}")
         return {}
+
+    def extract_durable_memories(
+        self,
+        existing_memories: list[str],
+        conversation_history: list[dict],
+        subject: str = "",
+    ) -> dict:
+        """
+        Consolidates long-term memory from full conversation history.
+        Preserves all historical context (even facts from a year ago).
+        Returns a dict:
+          {
+            "new_facts": ["fact 1", "fact 2"],
+            "resolved_facts": ["fact resolved"],
+            "preference_nudges": {"prefers_examples": 0.1, "prefers_step_by_step": 0.1, "preferred_length": "short"}
+          }
+        """
+        history_text = "\n".join(
+            f"{m.get('role','?').upper()}: {m.get('content','')[:250]}"
+            for m in conversation_history[-24:]
+        )
+        existing_str = "\n".join(f"- {m}" for m in existing_memories) if existing_memories else "(none yet)"
+
+        prompt = f"""You are the long-term memory consolidation system for an AI tutor.
+Review this tutoring conversation against the student's existing persistent memory.
+
+Existing Long-Term Memories (from student's history):
+{existing_str}
+
+Recent Conversation:
+{history_text}
+
+Subject: {subject or "General"}
+
+Identify:
+1. "new_facts": 1-3 new durable, high-signal facts about the student learned in this session.
+   - Good examples: "Struggles with balancing redox reactions", "Targeting 95% in Board exams", "Prefers real-life analogies before formulas", "Has science exam on Monday"
+   - Bad examples (DO NOT include): Trivial chit-chat ("said thank you"), ephemeral questions ("asked question 3"), or facts ALREADY in existing memory.
+2. "resolved_facts": Any existing memory facts that the student has now clearly mastered or resolved in this session.
+3. "preference_nudges": Any learning style adjustments detected:
+   - "prefers_examples": float delta (-0.1 to +0.2)
+   - "prefers_step_by_step": float delta (-0.1 to +0.2)
+   - "prefers_analogies": float delta (-0.1 to +0.2)
+   - "prefers_visuals": float delta (-0.1 to +0.2)
+   - "preferred_length": "short" | "medium" | "detailed" (or omit)
+
+Return ONLY a JSON object with keys "new_facts", "resolved_facts", and "preference_nudges":
+{{
+  "new_facts": [],
+  "resolved_facts": [],
+  "preference_nudges": {{}}
+}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                temperature=0.2,
+                max_tokens=400,
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            start, end = raw.find("{"), raw.rfind("}")
+            if start != -1:
+                data = json.loads(raw[start:end + 1])
+                return {
+                    "new_facts": data.get("new_facts", []) or [],
+                    "resolved_facts": data.get("resolved_facts", []) or [],
+                    "preference_nudges": data.get("preference_nudges", {}) or {},
+                }
+        except Exception as exc:
+            logger.warning(f"Durable memory extraction failed: {exc}")
+        return {"new_facts": [], "resolved_facts": [], "preference_nudges": {}}

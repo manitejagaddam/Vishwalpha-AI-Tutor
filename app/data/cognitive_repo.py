@@ -107,6 +107,45 @@ _BLOOM_APPLY = re.compile(
     r"compute|determine|find|work out)\b", re.IGNORECASE
 )
 
+# ── Real-time memory & preference detectors (zero LLM, per-turn) ───────────────
+_EXAM_TIMELINE = re.compile(
+    r"\b(?:my\s+)?(?:unit\s+test|board\s+exam|term\s+exam|preboard|exam|test|assessment|quiz)\s+"
+    r"(?:is\s+)?(?:on|this|next|tomorrow|coming\s+up|in\s+\d+\s+days?)\s+([a-zA-Z0-9\s]{2,20})",
+    re.IGNORECASE,
+)
+_CLASS_BOARD = re.compile(
+    r"\b(?:i\s*(?:am|'m)\s*(?:in\s*)?)?(?:class|grade)\s*(\d{1,2})(?:\s*(?:th|st|nd|rd))?\s*(cbse|icse|state\s*board|ncert)?\b",
+    re.IGNORECASE,
+)
+_PREF_BULLETS_SHORT = re.compile(
+    r"\b(?:keep\s+it\s+(?:short|brief|concise)|in\s+bullets?|use\s+bullet\s+points?|too\s+long|don'?t\s+write\s+(?:too\s+much|long\s+paragraphs?))\b",
+    re.IGNORECASE,
+)
+_PREF_DETAILED = re.compile(
+    r"\b(?:explain\s+in\s+detail|give\s+(?:full|detailed)\s+explanations?|in-depth|step\s*by\s*step|elaborate\s+more)\b",
+    re.IGNORECASE,
+)
+_PREF_EXAMPLES = re.compile(
+    r"\b(?:give\s+(?:an?\s+)?examples?|more\s+examples?|real\s*life\s+examples?|practical\s+examples?)\b",
+    re.IGNORECASE,
+)
+_PREF_ANALOGY = re.compile(
+    r"\b(?:explain\s+like\s+i'?m\s+\d+|use\s+an?\s+analog(?:y|ies)|simple\s+analog(?:y|ies)|relate\s+to\s+daily\s+life)\b",
+    re.IGNORECASE,
+)
+_PREF_VISUAL = re.compile(
+    r"\b(?:diagrams?|visuals?|draw(?:ings?)?|charts?|sketch(?:es)?|illustrations?|mind\s*maps?)\b",
+    re.IGNORECASE,
+)
+_LANG_PREF = re.compile(
+    r"\b(?:don'?t\s+use\s+hindi|only\s+in\s+english|explain\s+in\s+english|in\s+hindi\s+please|hinglish)\b",
+    re.IGNORECASE,
+)
+_GOAL_TARGET = re.compile(
+    r"\b(?:target|aiming\s+for|want\s+to\s+score)\s+(\d{1,3}%?)\b",
+    re.IGNORECASE,
+)
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -443,6 +482,58 @@ def detect_sentiment(question: str) -> str:
     if re.search(r"\b(thanks|thank|great|awesome|cool|nice|amazing)\b", question, re.IGNORECASE):
         return "positive"
     return "neutral"
+
+
+def extract_realtime_memory_and_nudges(question: str) -> dict:
+    """
+    Fast regex scanner on student input (runs in <1ms on every turn).
+    Returns discovered durable facts and preference adjustments.
+    """
+    facts = []
+    nudges = {}
+    pref_field = {}
+
+    m_exam = _EXAM_TIMELINE.search(question)
+    if m_exam:
+        facts.append(f"Upcoming assessment: {m_exam.group(0).strip()}")
+
+    m_cb = _CLASS_BOARD.search(question)
+    if m_cb and (m_cb.group(1) or m_cb.group(2)):
+        cls = m_cb.group(1) or ""
+        brd = m_cb.group(2) or ""
+        desc = f"Student mentions: Class {cls} {brd}".strip()
+        facts.append(desc)
+
+    m_goal = _GOAL_TARGET.search(question)
+    if m_goal:
+        facts.append(f"Score target: {m_goal.group(0).strip()}")
+
+    if _PREF_BULLETS_SHORT.search(question):
+        facts.append("Prefers concise bullet-point answers")
+        pref_field["preferred_length"] = "short"
+
+    if _PREF_DETAILED.search(question):
+        nudges["prefers_step_by_step"] = 0.15
+        pref_field["preferred_length"] = "detailed"
+
+    if _PREF_EXAMPLES.search(question):
+        nudges["prefers_examples"] = 0.15
+
+    if _PREF_ANALOGY.search(question):
+        nudges["prefers_analogies"] = 0.15
+
+    if _PREF_VISUAL.search(question):
+        nudges["prefers_visuals"] = 0.15
+
+    m_lang = _LANG_PREF.search(question)
+    if m_lang:
+        facts.append(f"Language preference: {m_lang.group(0).strip()}")
+
+    return {
+        "facts": facts,
+        "nudges": nudges,
+        "pref_field": pref_field,
+    }
 
 
 def append_pending_signal(
@@ -925,6 +1016,20 @@ def nudge_learning_preference(user_id: str, key: str, delta: float) -> None:
         if hasattr(pref, key):
             current = getattr(pref, key) or 0.5
             setattr(pref, key, _clamp(current + delta, 0.0, 1.0))
+
+
+def set_learning_preference_field(user_id: str, key: str, value) -> None:
+    """Sets a field on LearningPreference (e.g. preferred_length)."""
+    with managed_session() as db:
+        pref = db.query(LearningPreference).filter(
+            LearningPreference.user_id == user_id,
+        ).first()
+        if not pref:
+            pref = LearningPreference(user_id=user_id)
+            db.add(pref)
+            db.flush()
+        if hasattr(pref, key):
+            setattr(pref, key, value)
 
 
 def llm_update_cognitive_profile(user_id: str, subject_id: int, llm_signals: dict) -> dict:

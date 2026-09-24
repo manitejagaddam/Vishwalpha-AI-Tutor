@@ -40,6 +40,8 @@ from app.data.session_repo import (
     get_student_memory,
     get_student_tasks,
     update_session_mood,
+    add_fast_memory_fact,
+    consolidate_student_memories,
 )
 from app.data.quiz_repo import (
     get_yesterday_session_context,
@@ -63,6 +65,9 @@ from app.data.cognitive_repo import (
     update_topic_mastery_from_chat,
     get_student_weak_topics,
     get_topics_due_for_review,
+    extract_realtime_memory_and_nudges,
+    nudge_learning_preference,
+    set_learning_preference_field,
     get_learning_preferences,
     llm_update_cognitive_profile,
 )
@@ -126,11 +131,39 @@ def run_deep_session_sync(
         except Exception as e:
             logger.warning(f"[DeepSync] Failed to fetch full history: {e}")
 
-        # ── Step 1: Memory update ─────────────────────────────────────────────
-        remark = llm.generate_remark(context_snippet)
-        if remark:
-            update_session_remark(conversation_id, remark)
-            update_student_memory(user_id, subject_id, remark, context_snippet)
+        # ── Step 1: Long-Term Memory consolidation (Full History, Non-Destructive) ──
+        try:
+            existing_memories = get_student_memory(user_id, subject_id)
+            mem_result = llm.extract_durable_memories(
+                existing_memories=existing_memories,
+                conversation_history=full_history if full_history else [{"role": "user", "content": context_snippet}],
+                subject=subject_name,
+            )
+            new_facts = mem_result.get("new_facts", [])
+            resolved_facts = mem_result.get("resolved_facts", [])
+            pref_nudges = mem_result.get("preference_nudges", {})
+
+            last_msg_id = full_history[-1].get("id") if full_history else None
+            consolidate_student_memories(
+                student_id=user_id,
+                subject_id=subject_id,
+                new_facts=new_facts,
+                resolved_facts=resolved_facts,
+                source_message_id=last_msg_id,
+            )
+
+            # Apply preference nudges from LLM
+            if pref_nudges:
+                for p_key, p_val in pref_nudges.items():
+                    if p_key == "preferred_length" and p_val in ("short", "medium", "detailed"):
+                        set_learning_preference_field(user_id, "preferred_length", p_val)
+                    elif isinstance(p_val, (int, float)) and p_val != 0:
+                        nudge_learning_preference(user_id, p_key, float(p_val))
+                _get_session_cache()._safe_del(f"sess:prefs:{user_id}")
+
+            logger.info(f"[DeepSync] Memory consolidated: {len(new_facts)} new, {len(resolved_facts)} resolved")
+        except Exception as e:
+            logger.warning(f"[DeepSync] Memory consolidation failed: {e}", exc_info=True)
 
         # ── Step 2: Session Insight ───────────────────────────────────────────
         if full_history and len(full_history) >= 2:
@@ -294,12 +327,12 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         student_bloom = detect_bloom_level(request.question)
         contains_question = "?" in request.question
 
-        # ── Get History Up To This Message (Linearized) ───────────────────────
+        # ── Get History Up To This Message (Linearized working context) ───────
         history_dicts = get_message_history(
             db, 
             conversation_id, 
             leaf_message_id=parent_id, 
-            limit=10
+            limit=18
         )
         history = [Msg(h["role"], h["content"]) for h in history_dicts]
 
@@ -372,10 +405,40 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         except Exception as e:
             logger.warning(f"Spaced repetition check failed: {e}")
 
-    # ── Student memory + learning preferences (session-cached) ───────────────────────
+    # ── Real-time memory & learning preference capture (Zero LLM, per-turn) ───
     _sc = _get_session_cache()
     sid_int = int(subject_id_resolved) if subject_id_resolved else 0
 
+    try:
+        rt_scan = extract_realtime_memory_and_nudges(request.question)
+        fast_facts = rt_scan.get("facts", [])
+        nudges = rt_scan.get("nudges", {})
+        pref_fields = rt_scan.get("pref_field", {})
+
+        new_fact_added = False
+        for ff in fast_facts:
+            if add_fast_memory_fact(
+                student_id=str(user.id),
+                fact=ff,
+                subject_id=subject_id_resolved,
+                source_message_id=str(student_msg_id),
+            ):
+                new_fact_added = True
+
+        for n_key, n_val in nudges.items():
+            nudge_learning_preference(str(user.id), n_key, n_val)
+        for pf_key, pf_val in pref_fields.items():
+            set_learning_preference_field(str(user.id), pf_key, pf_val)
+
+        # Invalidate session cache so the current turn immediately picks up newly captured facts/prefs
+        if new_fact_added:
+            _sc._safe_del(f"sess:memory:{user.id}:{sid_int}")
+        if nudges or pref_fields:
+            _sc._safe_del(f"sess:prefs:{user.id}")
+    except Exception as e:
+        logger.warning(f"[Chat] Real-time memory capture failed: {e}")
+
+    # ── Student memory + learning preferences (session-cached) ───────────────────────
     memory_items = _sc.get_session_memory(str(user.id), sid_int)
     if memory_items is None:
         memory_items = get_student_memory(user.id, subject_id_resolved)

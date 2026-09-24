@@ -76,6 +76,14 @@ class RetrievalCache:
         except Exception as exc:
             logger.debug(f"Cache SET error [{key}]: {exc}")
 
+    def _safe_del(self, *keys: str) -> None:
+        if not self._client or not keys:
+            return
+        try:
+            self._client.delete(*keys)
+        except Exception as exc:
+            logger.debug(f"Cache DEL error: {exc}")
+
     # ── Layer 1: Embedding cache ───────────────────────────────────────────────
 
     def get_embedding(self, query: str) -> list[float] | None:
