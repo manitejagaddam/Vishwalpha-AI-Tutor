@@ -2,9 +2,8 @@ import axios from 'axios';
 
 export const PROD_API = 'https://vishwalpha-ai-tutor-production.up.railway.app';
 export const API_BASE = (
-  import.meta.env.VITE_API_BASE || 
-  import.meta.env.VITE_API_URL || 
   import.meta.env.API_URL || 
+  import.meta.env.API_BASE || 
   (import.meta.env.PROD ? PROD_API : 'http://localhost:8000')
 ).replace(/\/+$/, '');
 
