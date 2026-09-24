@@ -41,8 +41,8 @@ limiter = Limiter(key_func=get_remote_address)
 @router.post("/chat", response_model=ChatResponse)
 @limiter.limit("30/minute")
 async def chat_endpoint(
-    request: ChatRequest,
-    http_request: Request = None,
+    payload: ChatRequest,
+    request: Request,
     user: User = Depends(get_current_user),
 ):
     """
@@ -52,7 +52,7 @@ async def chat_endpoint(
     try:
         # Run the synchronous orchestrator in a thread pool so we don't
         # block the async event loop under concurrent load.
-        response = await asyncio.to_thread(chat, request, user)
+        response = await asyncio.to_thread(chat, payload, user)
         return response
     except Exception as exc:
         logger.error(f"Chat error: {exc}", exc_info=True)
@@ -66,8 +66,8 @@ async def chat_endpoint(
 @router.post("/chat/stream")
 @limiter.limit("30/minute")
 async def chat_stream_endpoint(
-    request: ChatRequest,
-    http_request: Request = None,
+    payload: ChatRequest,
+    request: Request,
     user: User = Depends(get_current_user),
 ):
     """
@@ -82,7 +82,7 @@ async def chat_stream_endpoint(
     """
     async def _generate():
         try:
-            async for chunk in chat_stream(request, user):
+            async for chunk in chat_stream(payload, user):
                 yield chunk
         except Exception as exc:
             import json
@@ -113,9 +113,9 @@ class SessionEndRequest(BaseModel):
 @router.post("/chat/session/end")
 @limiter.limit("10/minute")
 async def chat_session_end_endpoint(
-    request: SessionEndRequest,
+    payload: SessionEndRequest,
     background_tasks: BackgroundTasks,
-    http_request: Request = None,
+    request: Request,
     user: User = Depends(get_current_user),
 ):
     """
@@ -123,18 +123,18 @@ async def chat_session_end_endpoint(
     (memory extraction, weak topics recalculation, learning preferences) 
     in the background so it doesn't block the client.
     """
-    if not request.conversation_id or not str(request.conversation_id).strip() or request.conversation_id in ("new", "null", "undefined"):
+    if not payload.conversation_id or not str(payload.conversation_id).strip() or payload.conversation_id in ("new", "null", "undefined"):
         return {"status": "skipped", "detail": "Empty or new conversation_id"}
 
     # Fetch conversation to ensure it exists and belongs to user
     from app.data.database import managed_session
     with managed_session() as db:
-        conv = get_conversation(db, request.conversation_id)
+        conv = get_conversation(db, payload.conversation_id)
         if not conv or str(conv.user_id) != str(user.id):
             return {"status": "skipped", "detail": "Conversation not found"}
             
         # Get the latest message for context
-        history = get_message_history(db, request.conversation_id, limit=2)
+        history = get_message_history(db, payload.conversation_id, limit=2)
         context_snippet = ""
         if len(history) >= 2:
             context_snippet = history[-2]["content"][:200] + " → " + history[-1]["content"][:200]
@@ -145,14 +145,14 @@ async def chat_session_end_endpoint(
     background_tasks.add_task(
         run_deep_session_sync,
         str(user.id),
-        request.subject_id,
-        request.conversation_id,
+        payload.subject_id,
+        payload.conversation_id,
         context_snippet
     )
     
     # Clear the last sync timestamp in Redis so next session starts fresh
     _sc = _get_session_cache()
-    sid_int = int(request.subject_id) if request.subject_id else 0
+    sid_int = int(payload.subject_id) if payload.subject_id else 0
     if _sc._client:
         _sc._client.delete(f"sess:last_sync:{user.id}:{sid_int}")
         
