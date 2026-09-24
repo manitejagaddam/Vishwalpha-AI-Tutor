@@ -64,13 +64,11 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # ── CORS: origins & regex from settings / env vars ──────────────────────
+    # ── CORS: origins from env var (comma-separated list) ──────────────────────
     _origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
-    _origin_regex = getattr(settings, "ALLOWED_ORIGIN_REGEX", None)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_origins,
-        allow_origin_regex=_origin_regex if _origin_regex else None,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -94,10 +92,6 @@ def create_app() -> FastAPI:
     uploads_dir = Path("uploads")
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
-    @app.get("/", tags=["System"])
-    def root():
-        return {"status": "ok", "message": "VishwAlpha AI Tutor API is running", "docs": "/docs"}
 
     @app.get("/health", tags=["System"])
     def health_check():

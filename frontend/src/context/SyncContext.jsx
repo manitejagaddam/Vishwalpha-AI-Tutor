@@ -35,7 +35,7 @@ export function SyncProvider({ children }) {
     if (!student?.access_token) return;
 
     // Resolve ws:// or wss:// URL
-    const rawApiBase = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const rawApiBase = import.meta.env.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000';
     const apiBase = rawApiBase.replace(/\/+$/, '');
     const wsProto = apiBase.startsWith('https') ? 'wss:' : 'ws:';
     const host = apiBase.replace(/^https?:\/\//, '');
