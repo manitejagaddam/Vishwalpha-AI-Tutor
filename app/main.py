@@ -21,7 +21,7 @@ from app.config import settings
 from app.data.database import init_db
 from app.middleware import RequestTracingMiddleware, SecurityHeadersMiddleware
 
-from app.api import auth, student, curriculum, chat, sessions, quiz, admin, spaces, attachments
+from app.api import auth, student, curriculum, chat, sessions, quiz, admin, spaces, attachments, sync
 
 logger = logging.getLogger("app")
 
@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(spaces.router)
     app.include_router(attachments.router)
+    app.include_router(sync.router)
 
     # ── Static uploads directory for student attachments
     uploads_dir = Path("uploads")

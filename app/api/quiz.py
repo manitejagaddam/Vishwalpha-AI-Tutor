@@ -87,11 +87,12 @@ def generate_quiz_endpoint(
             # 2. Try by case-insensitive name
             if not sub and req_sub:
                 sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == req_sub.lower()).first()
-            # 3. Fallback to conversation subject if session_id is provided
-            if not sub and request.session_id:
+            # 3. Fetch conversation if session_id is provided
+            conv = None
+            if request.session_id:
                 from app.data.models.chat import Conversation
                 conv = db.query(Conversation).filter(Conversation.id == request.session_id).first()
-                if conv and conv.subject_id:
+                if not sub and conv and conv.subject_id:
                     sub = db.query(Subject).filter(Subject.id == conv.subject_id).first()
             # 4. Fallback to first available subject in DB
             if not sub:
@@ -102,6 +103,23 @@ def generate_quiz_endpoint(
 
             subject_id = sub.id
             subject_name = sub.name
+
+            # Resolve effective topic if topic is empty or unspecified
+            effective_topic = (request.topic or "").strip()
+            if not effective_topic:
+                if conv and conv.last_topic_name:
+                    effective_topic = conv.last_topic_name
+                else:
+                    from app.data.models.content import Chapter, Book
+                    top = (
+                        db.query(Topic.title)
+                        .join(Chapter, Topic.chapter_id == Chapter.id)
+                        .join(Book, Chapter.book_id == Book.id)
+                        .filter(Book.subject_id == subject_id)
+                        .first()
+                    )
+                    effective_topic = top[0] if top else f"Comprehensive {subject_name} Review"
+
             metrics = get_subject_metrics(db, student_id, subject_id)
 
         memory_items = get_student_memory(student_id, str(subject_id))
@@ -112,7 +130,7 @@ def generate_quiz_endpoint(
 
         questions = generate_quiz(
             subject=subject_name,
-            topic=request.topic,
+            topic=effective_topic,
             class_num=class_num,
             student_memory=memory_str,
             cognitive_metrics=metrics,
@@ -126,7 +144,7 @@ def generate_quiz_endpoint(
         attempt_id = create_quiz_attempt(
             student_id=student_id,
             subject_id=subject_id,
-            topic=request.topic,
+            topic=effective_topic,
             source=request.source,
             conversation_id=request.session_id or None,
             num_questions=len(questions),
@@ -137,7 +155,7 @@ def generate_quiz_endpoint(
         return GenerateQuizResponse(
             attempt_id=attempt_id,
             subject=subject_name,
-            topic=request.topic,
+            topic=effective_topic,
             source=request.source,
             questions=[
                 QuizQuestionOut(
@@ -305,6 +323,23 @@ def finish_quiz_endpoint(
             get_redis_cache().invalidate_session_state(user_id, subject_id)
         except Exception as e:
             logger.warning(f"Session cache invalidation after quiz failed: {e}")
+
+        # 10. Real-Time Cross-Device Sync (Addon #4)
+        try:
+            from app.services.sync_service import sync_manager
+            sync_manager.sync_broadcast(
+                user_id=str(user_id),
+                event="quiz_completed",
+                data={
+                    "attempt_id": str(request.attempt_id),
+                    "score": score,
+                    "passed": passed,
+                    "topic": topic,
+                    "subject": subject_name,
+                },
+            )
+        except Exception as e:
+            logger.debug(f"[RealTime Sync] Quiz sync broadcast failed: {e}")
 
         return FinishQuizResponse(
             attempt_id=request.attempt_id,

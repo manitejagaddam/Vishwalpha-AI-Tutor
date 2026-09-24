@@ -78,6 +78,15 @@ def _decode_token(token: str) -> dict:
         )
 
 
+def decode_token_user_id(token: str) -> str | None:
+    """Decodes and returns the user ID string from a JWT without raising an exception."""
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[_ALGORITHM])
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
 # ── FastAPI dependencies ───────────────────────────────────────────────────────
 
 def get_current_user(
