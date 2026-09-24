@@ -23,6 +23,7 @@ import time
 import logging
 import asyncio
 import re
+import threading
 from typing import AsyncGenerator
 
 from app.schemas.chat import ChatRequest, ChatResponse
@@ -86,7 +87,6 @@ def _get_session_cache() -> RetrievalCache:
         _session_cache = RetrievalCache()
     return _session_cache
 
-import threading
 
 def run_deep_session_sync(user_id: str, subject_id: int | None, conversation_id: str, context_snippet: str) -> None:
     """
@@ -236,6 +236,45 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         )
         student_msg_id = student_msg.id
 
+        if request.attachments:
+            from app.data.models.chat import MessageContentBlock
+            for idx, att in enumerate(request.attachments, start=1):
+                ctype = att.get("content_type", "")
+                b_type = "image" if ctype.startswith("image/") else "text"
+                db.add(MessageContentBlock(
+                    message_id=student_msg.id,
+                    block_type=b_type,
+                    content=att.get("url") or att.get("filename"),
+                    extra_data=att,
+                    block_index=idx,
+                ))
+            db.flush()
+
+    # ── Process Student Attachments (Multimodal Context) ──────────────────────
+    attachment_context_str = ""
+    attachment_query_addon = ""
+    if request.attachments:
+        att_parts = []
+        for att in request.attachments:
+            fn = att.get("filename", "attachment")
+            desc = att.get("description", "")
+            txt = att.get("extracted_text", "")
+            hint = att.get("topic_hint", "")
+            part = f"- File: {fn}"
+            if desc:
+                part += f"\n  Visual/Diagram Analysis: {desc}"
+            if txt:
+                part += f"\n  Transcribed Questions/Math: {txt}"
+            if hint:
+                part += f"\n  Topic Hint: {hint}"
+            att_parts.append(part)
+            if txt:
+                attachment_query_addon += f" {txt[:200]}"
+            elif hint:
+                attachment_query_addon += f" {hint}"
+        if att_parts:
+            attachment_context_str = "[Student Uploaded Attachment(s) / Diagram / Homework Photo]:\n" + "\n".join(att_parts)
+
     # ── Yesterday context + spaced repetition reviews ─────────────────────────
     yesterday_ctx: YesterdayContext | None = None
     review_topics: list[dict] = []
@@ -300,10 +339,10 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     q_words = set(re.findall(r"\w+", request.question.lower()))
     has_reference = bool(q_words & referential_triggers)
 
-    if is_conversational(request.question) and not (has_reference and (conv_last_topic or history)):
+    if is_conversational(request.question) and not request.attachments and not (has_reference and (conv_last_topic or history)):
         question_type = "conversational"
     else:
-        question_type = llm.classify_question(request.question, history)
+        question_type = "curriculum" if request.attachments else llm.classify_question(request.question, history)
 
     # ── Retrieval (curriculum only) ───────────────────────────────────────────
     context         = ""
@@ -316,7 +355,9 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     if question_type == "curriculum":
         router = _get_router()
         routing_query = request.question
-        if has_reference:
+        if attachment_query_addon:
+            routing_query = f"{request.question} {attachment_query_addon}".strip()
+        elif has_reference:
             if conv_last_topic:
                 routing_query = f"{conv_last_topic} {request.question}"
             elif history:
@@ -354,10 +395,16 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
             logger.info("Router found no route → open_curriculum mode")
             generation_mode = "open_curriculum"
 
+    if attachment_context_str:
+        context = (attachment_context_str + ("\n\n[Relevant NCERT Textbook Context]:\n" + context if context else "")).strip()
+        if generation_mode == "conversational":
+            generation_mode = "curriculum"
+
     return {
         "conversation_id":  conversation_id,
         "new_conversation": new_conversation,
         "student_msg_id":   student_msg_id,
+        "attachments":      request.attachments or [],
         "history":          history,
         "class_num":        class_num,
         "subject_id":       subject_id_resolved,
@@ -406,7 +453,6 @@ def _post_generation_pipeline(
 
     # ── Generate title for new sessions (background) ──────────────────────────
     if new_conversation:
-        import threading
         def _gen_title(cid, msg: str):
             try:
                 with managed_session() as db:
@@ -575,6 +621,29 @@ def _post_generation_pipeline(
 
     pending_tasks = get_student_tasks(user.id, subject_id_resolved)
 
+    # ── Real-Time Cross-Device Sync (Addon #4) ────────────────────────────────
+    try:
+        from app.services.sync_service import sync_manager
+        sync_manager.sync_broadcast(
+            user_id=str(user.id),
+            event="message_received",
+            data={
+                "session_id": str(conversation_id),
+                "message": {
+                    "id": str(tutor_msg_id),
+                    "role": "tutor",
+                    "content": answer,
+                    "topic": ctx.get("routed_topic", ""),
+                    "chapter": ctx.get("routed_chapter", ""),
+                    "question_type": ctx.get("generation_mode", "conversational"),
+                    "sources": [s.model_dump() for s in ctx.get("sources", [])],
+                },
+                "conversation_length": turn_count,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"[RealTime Sync] Message sync broadcast error: {e}")
+
     return metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj, tutor_msg_id
 
 
@@ -612,6 +681,7 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         message_id=msg_id,
         answer=answer,
         sources=ctx["sources"],
+        attachments=ctx.get("attachments", []),
         conversation_length=turn_count,
         routed_chapter=ctx["routed_chapter"],
         routed_topic=ctx["routed_topic"],
@@ -739,6 +809,7 @@ async def chat_stream(
         "type": "done",
         "message_id": str(msg_id),
         "sources": [s.model_dump() for s in ctx["sources"]],
+        "attachments":      ctx.get("attachments", []),
         "routed_chapter":   ctx["routed_chapter"],
         "routed_topic":     ctx["routed_topic"],
         "question_type":    ctx["generation_mode"],

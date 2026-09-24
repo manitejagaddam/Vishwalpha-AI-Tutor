@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
-import { chatApi, quizApi } from '../../api/client';
+import { useSync } from '../../context/SyncContext';
+import { chatApi, quizApi, attachmentsApi } from '../../api/client';
 import { 
   Send, Sparkles, Share2, Copy, Check, RotateCcw, 
-  Edit3, EyeOff, Eye, ThumbsUp, ThumbsDown, ShieldAlert, Folder, PanelRight
+  Edit3, EyeOff, Eye, ThumbsUp, ThumbsDown, ShieldAlert, Folder, PanelRight,
+  Paperclip, X, Image as ImageIcon, FileText, Loader2, Maximize2
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,9 +32,18 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     loadSession
   } = useSession();
 
+  const { isConnected, activeDevices, remoteTyping } = useSync();
+
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const scrollRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // ── Attachments State (Addon #3) ───────────────────────────────────────────
+  const [pendingAttachments, setPendingAttachments] = useState([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [previewImage, setPreviewImage] = useState(null);
 
   // ── Modals & Addon States ──────────────────────────────────────────────────
   const [showShareModal, setShowShareModal] = useState(false);
@@ -48,24 +59,38 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
   // Per-message quiz suggestions: { [msgIndex]: { topic, subject, numQuestions } }
   const [quizSuggestions, setQuizSuggestions] = useState({});
   const [dismissedSuggestions, setDismissedSuggestions] = useState(new Set());
+  const quizCardRef = useRef(null);
 
   // Auto-scroll on new messages
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && !activeQuiz) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isThinking, activeQuiz]);
+  }, [messages, isThinking]);
+
+  // Smooth scroll directly to active quiz card
+  useEffect(() => {
+    if (activeQuiz) {
+      const timer = setTimeout(() => {
+        if (quizCardRef.current) {
+          quizCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [activeQuiz]);
 
   const yesterdayCtxSetRef = useRef(false);
 
   // ── Fetch yesterday context on mount ─────────────────────────────────────────
   useEffect(() => {
-    if (!student?.student_id) return;
+    const studentId = student?.user_id || student?.id || student?.student_id;
+    if (!studentId) return;
     yesterdayCtxSetRef.current = false;
     setYesterdayCtx(null);
     setYesterdayBannerDismissed(false);
 
-    quizApi.getYesterdayContext(student.student_id)
+    quizApi.getYesterdayContext(studentId)
       .then(data => {
         if (data?.topic) {
           setYesterdayCtx(data);
@@ -75,20 +100,51 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
       .catch(() => {});
   }, [student?.student_id, subject]);
 
+  // ── Attachment handlers (Addon #3) ─────────────────────────────────────────
+  const handleFileSelect = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      for (const file of files) {
+        const res = await attachmentsApi.upload(file);
+        setPendingAttachments(prev => [...prev, res]);
+      }
+    } catch (err) {
+      console.error("Upload error:", err);
+      setUploadError(err.response?.data?.detail || err.message || "Failed to upload file.");
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const removeAttachment = (idxToRemove) => {
+    setPendingAttachments(prev => prev.filter((_, i) => i !== idxToRemove));
+  };
+
   // ── Core send message function (supports branching with parentMessageId) ─────
   const executeSend = async (questionText, parentMessageId = null) => {
-    if (!questionText.trim()) return;
+    if (!questionText.trim() && pendingAttachments.length === 0) return;
+
+    const finalQuestion = questionText.trim() || (pendingAttachments.length > 0 ? "Please analyze and explain the attached diagram / problem." : "");
+    const currentAttachments = [...pendingAttachments];
+    setPendingAttachments([]);
 
     // Optimistic append
     const newMsg = { 
       role: 'student', 
-      content: questionText,
+      content: finalQuestion,
       parent_message_id: parentMessageId,
+      attachments: currentAttachments,
     };
+    const clientTempId = `stream-${Date.now()}`;
     setMessages(prev => [...prev, newMsg]);
     
-    // Add empty tutor message to stream into
+    // Add empty tutor message to stream into with explicit temporary client ID
     setMessages(prev => [...prev, {
+      id: clientTempId,
       role: 'tutor',
       content: '',
       sources: [],
@@ -104,9 +160,10 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           parent_message_id: parentMessageId,
           study_space_id: activeSpaceId,
           incognito: isIncognito,
-          question: questionText,
+          question: finalQuestion,
           subject: subject,
-          tutor_mode: tutorMode
+          tutor_mode: tutorMode,
+          attachments: currentAttachments,
         },
         // onChunk
         (token, meta) => {
@@ -123,10 +180,12 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           if (token) {
             setIsThinking(false);
             setMessages(prev => {
+              const idx = prev.findIndex(m => m.id === clientTempId);
               const newMsgs = [...prev];
-              const last = { ...newMsgs[newMsgs.length - 1] };
-              last.content += token;
-              newMsgs[newMsgs.length - 1] = last;
+              const targetIdx = idx !== -1 ? idx : newMsgs.length - 1;
+              const last = { ...newMsgs[targetIdx] };
+              last.content = (last.content || '') + token;
+              newMsgs[targetIdx] = last;
               return newMsgs;
             });
           }
@@ -134,24 +193,38 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         // onDone
         (data) => {
           setMessages(prev => {
+            // Locate the streaming message by temp ID or server ID
+            let targetIdx = prev.findIndex(m => m.id === clientTempId || (data.message_id && m.id === data.message_id));
+            if (targetIdx === -1) targetIdx = prev.length - 1;
+
             const newMsgs = [...prev];
-            const last = { ...newMsgs[newMsgs.length - 1] };
+            const last = { ...newMsgs[targetIdx] };
             last.isStreaming = false;
             last.id = data.message_id || last.id;
-            last.sources = data.sources || [];
-            last.chunks = data.chunks || [];
-            last.context = data.context || '';
-            last.prompt_messages = data.prompt_messages || [];
-            last.chapter = data.routed_chapter;
-            last.topic = data.routed_topic;
-            last.question_type = data.question_type;
-            last.quiz_suggestion = data.quiz_suggestion || null;
-            newMsgs[newMsgs.length - 1] = last;
+            last.sources = data.sources || last.sources || [];
+            last.chunks = data.chunks || last.chunks || [];
+            last.context = data.context || last.context || '';
+            last.prompt_messages = data.prompt_messages || last.prompt_messages || [];
+            last.chapter = data.routed_chapter || last.chapter;
+            last.topic = data.routed_topic || last.topic;
+            last.question_type = data.question_type || last.question_type;
+            last.quiz_suggestion = data.quiz_suggestion || last.quiz_suggestion || null;
+            newMsgs[targetIdx] = last;
+
+            // Deduplicate across array so the message ID and client ID never create two bubbles
+            const seenIds = new Set();
+            const deduplicated = [];
+            for (const msg of newMsgs) {
+              const key = msg.id || `${msg.role}-${msg.content?.slice(0, 30)}`;
+              if (seenIds.has(key)) continue;
+              seenIds.add(key);
+              deduplicated.push(msg);
+            }
             
             if (data.quiz_suggestion) {
-              setQuizSuggestions(old => ({ ...old, [newMsgs.length - 1]: data.quiz_suggestion }));
+              setQuizSuggestions(old => ({ ...old, [targetIdx]: data.quiz_suggestion }));
             }
-            return newMsgs;
+            return deduplicated;
           });
 
           if (data.metrics) {
@@ -202,7 +275,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
 
   const handleSend = (e) => {
     e.preventDefault();
-    if (!input.trim() || isThinking) return;
+    if ((!input.trim() && pendingAttachments.length === 0) || isThinking || isUploading) return;
     const text = input.trim();
     setInput('');
     executeSend(text);
@@ -308,8 +381,26 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           )}
         </div>
 
-        {/* Action Controls: Incognito Toggle & Share */}
+        {/* Action Controls: Live Sync, Incognito Toggle & Share */}
         <div className="flex items-center gap-2">
+          {/* Real-time Cross-Device Sync Indicator (Addon #4) */}
+          <div 
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+              isConnected 
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
+                : 'bg-black/30 text-gray-500 border-white/5'
+            }`}
+            title={isConnected ? `Real-Time Sync Active (${activeDevices} device${activeDevices > 1 ? 's' : ''} connected)` : 'Connecting to Real-Time Sync...'}
+          >
+            <span className="relative flex h-2 w-2">
+              {isConnected && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              )}
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${isConnected ? 'bg-emerald-400' : 'bg-gray-600'}`}></span>
+            </span>
+            <span className="hidden lg:inline text-[11px] font-mono tracking-tight">{isConnected ? 'Live Sync' : 'Offline'}</span>
+          </div>
+
           {/* Incognito Toggle Button */}
           <button
             onClick={() => setIsIncognito(!isIncognito)}
@@ -351,6 +442,14 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         </div>
       </div>
 
+      {/* Remote Cross-Device Activity Notice (Addon #4) */}
+      {remoteTyping && (
+        <div className="bg-indigo-950/40 border-b border-indigo-500/30 px-6 py-1.5 flex items-center justify-center gap-2 text-xs text-indigo-300 backdrop-blur-md animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping"></span>
+          <span>Activity detected from another connected device...</span>
+        </div>
+      )}
+
       {/* Incognito Ambient Warning Notice */}
       {isIncognito && (
         <div className="bg-amber-950/40 border-b border-amber-500/20 px-6 py-2 flex items-center justify-center gap-2 text-xs text-amber-300 backdrop-blur-md">
@@ -371,20 +470,9 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           />
         )}
 
-        {/* Active Quiz */}
-        {activeQuiz && (
-          <QuizCard
-            topic={activeQuiz.topic}
-            subject={activeQuiz.subject}
-            source={activeQuiz.source}
-            sessionId={activeQuiz.sessionId}
-            numQuestions={7}
-            onClose={handleQuizClose}
-          />
-        )}
 
         {/* Empty state */}
-        {messages.length === 0 && !yesterdayCtx && (
+        {messages.length === 0 && !yesterdayCtx && !activeQuiz && (
           <div className="flex flex-col items-center justify-center h-full text-center mt-[-40px]">
             <div className="w-24 h-24 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 rounded-full flex items-center justify-center mb-6 shadow-[0_0_40px_rgba(99,102,241,0.2)] border border-indigo-500/20">
               <Sparkles className="text-indigo-400 w-10 h-10" />
@@ -435,6 +523,49 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
                         }`}>
                           {msg.question_type === 'conversational' ? '💬 Conversational' : '📚 Curriculum'}
                         </span>
+                      </div>
+                    )}
+
+                    {/* Attached images / diagrams (Addon #3) */}
+                    {msg.attachments && msg.attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2.5 mb-3">
+                        {msg.attachments.map((att, attIdx) => {
+                          const isImg = att.content_type?.startsWith('image/') || att.url?.match(/\.(png|jpe?g|webp|gif)$/i);
+                          const fullUrl = att.url?.startsWith('http') ? att.url : `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}${att.url}`;
+                          return (
+                            <div 
+                              key={attIdx} 
+                              onClick={() => isImg && setPreviewImage(fullUrl)}
+                              className={`group relative flex items-center gap-2.5 p-2 pr-3.5 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/10 transition-all shadow-md ${isImg ? 'cursor-pointer hover:border-indigo-400/50' : ''}`}
+                            >
+                              {isImg ? (
+                                <img 
+                                  src={att.base64_thumbnail || fullUrl} 
+                                  alt={att.filename} 
+                                  className="w-12 h-12 object-cover rounded-xl border border-white/10 group-hover:scale-105 transition-transform" 
+                                />
+                              ) : (
+                                <div className="w-12 h-12 rounded-xl bg-indigo-500/20 flex items-center justify-center text-indigo-300">
+                                  <FileText size={22} />
+                                </div>
+                              )}
+                              <div className="flex flex-col text-left">
+                                <span className="text-xs font-semibold text-white max-w-[150px] truncate">{att.filename}</span>
+                                <span className="text-[10px] text-gray-400 max-w-[150px] truncate">
+                                  {att.topic_hint || (isImg ? 'Multimodal Diagram' : 'Document')}
+                                </span>
+                                {att.description && (
+                                  <span className="text-[10px] text-indigo-300 max-w-[150px] truncate">
+                                    Vision Analyzed
+                                  </span>
+                                )}
+                              </div>
+                              {isImg && (
+                                <Maximize2 size={13} className="text-gray-400 group-hover:text-white opacity-0 group-hover:opacity-100 transition-opacity ml-1" />
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
 
@@ -578,6 +709,21 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           </div>
         ))}
 
+        {/* Active Quiz Card */}
+        {activeQuiz && (
+          <div ref={quizCardRef} className="w-full max-w-3xl mx-auto my-4 transition-all">
+            <QuizCard
+              key={activeQuiz.key || 'active-quiz'}
+              topic={activeQuiz.topic}
+              subject={activeQuiz.subject}
+              source={activeQuiz.source}
+              sessionId={activeQuiz.sessionId}
+              numQuestions={7}
+              onClose={handleQuizClose}
+            />
+          </div>
+        )}
+
         {/* Thinking indicator */}
         {isThinking && (
           <div className="flex justify-start">
@@ -595,13 +741,67 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
 
       {/* Input area */}
       <div className="p-6 bg-gradient-to-t from-black/80 to-transparent backdrop-blur-md">
+        {/* Uploaded attachments preview row (Addon #3) */}
+        {(pendingAttachments.length > 0 || isUploading || uploadError) && (
+          <div className="max-w-4xl mx-auto mb-2.5 flex flex-wrap gap-2 items-center px-1">
+            {pendingAttachments.map((att, idx) => (
+              <div key={idx} className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 border border-white/20 backdrop-blur-md text-xs text-white shadow-lg animate-fadeIn">
+                <ImageIcon size={14} className="text-indigo-400" />
+                <span className="max-w-[140px] truncate font-medium">{att.filename}</span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(idx)}
+                  className="p-0.5 rounded-full hover:bg-white/20 text-gray-400 hover:text-white transition-colors"
+                  title="Remove attachment"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+            {isUploading && (
+              <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-xs text-indigo-200 backdrop-blur-md animate-pulse">
+                <Loader2 size={13} className="animate-spin text-indigo-400" />
+                <span>Analyzing diagram / homework with Vision...</span>
+              </div>
+            )}
+            {uploadError && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-500/20 border border-rose-500/30 text-xs text-rose-300">
+                <span>{uploadError}</span>
+                <button type="button" onClick={() => setUploadError(null)} className="ml-1 hover:text-white">
+                  <X size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         <form onSubmit={handleSend} className="relative max-w-4xl mx-auto flex gap-3 items-end">
+          {/* File input for student attachments */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileSelect}
+            accept="image/*,application/pdf"
+            multiple
+            className="hidden"
+            id="chat-file-upload"
+          />
+          <label
+            htmlFor="chat-file-upload"
+            className={`relative h-[56px] w-[50px] shrink-0 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-2xl flex items-center justify-center cursor-pointer transition-all text-gray-400 hover:text-white shadow-inner ${
+              isUploading ? 'opacity-50 pointer-events-none' : ''
+            } ${pendingAttachments.length > 0 ? 'text-indigo-400 border-indigo-400/40 bg-indigo-500/10' : ''}`}
+            title="Attach diagram, math problem, or homework photo"
+          >
+            <Paperclip size={20} />
+          </label>
+
           <div className="relative flex-1 group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 rounded-3xl opacity-30 group-focus-within:opacity-100 blur transition duration-500 group-hover:opacity-70"></div>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              disabled={isThinking}
+              disabled={isThinking || isUploading}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -614,14 +814,14 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
                   ? "Incognito: Ask a question (no memory saved)..."
                   : activeSpace 
                     ? `Ask within ${activeSpace.title}... (Shift+Enter for new line)`
-                    : "Ask a question from your textbook... (Shift+Enter for new line)"
+                    : "Ask a question or upload a diagram... (Shift+Enter for new line)"
               }
               className="relative w-full bg-black/60 backdrop-blur-xl rounded-3xl px-6 py-4 text-[15px] text-white placeholder-gray-500 focus:outline-none resize-none border border-white/10 leading-relaxed shadow-inner"
             />
           </div>
           <button
             type="submit"
-            disabled={isThinking || !input.trim()}
+            disabled={isThinking || isUploading || (!input.trim() && pendingAttachments.length === 0)}
             className="relative h-[56px] w-[56px] shrink-0 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl flex items-center justify-center text-white hover:from-indigo-500 hover:to-purple-500 transition-all disabled:opacity-50 disabled:grayscale shadow-[0_4px_20px_rgba(99,102,241,0.4)] group overflow-hidden"
           >
             <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
@@ -629,6 +829,28 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           </button>
         </form>
       </div>
+
+      {/* Image Lightbox Modal */}
+      {previewImage && (
+        <div 
+          onClick={() => setPreviewImage(null)}
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
+        >
+          <div className="relative max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl border border-white/20 shadow-2xl">
+            <img 
+              src={previewImage} 
+              alt="Attachment Preview" 
+              className="w-full h-full object-contain max-h-[85vh] rounded-2xl" 
+            />
+            <button 
+              onClick={() => setPreviewImage(null)}
+              className="absolute top-3 right-3 p-2 rounded-full bg-black/60 hover:bg-black text-white transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Share Modal */}
       {showShareModal && (

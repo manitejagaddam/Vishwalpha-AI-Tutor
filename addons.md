@@ -21,22 +21,33 @@ Each entry has enough detail that another developer can pick it up and implement
 
 ---
 
-## 3. Attachments (Images / PDFs from Students)
+## 3. Attachments (Images / PDFs from Students) — COMPLETED
 
-**Priority:** High
-**Deferred because:** Needs Supabase Storage + virus-scan hook.
-
-### How to Implement
-1. `POST /attachments/upload` → pre-signed Supabase Storage URL.
-2. Background job: extract text or call GPT-4.1-mini vision API.
-3. Chat pipeline: inject `extracted_text` + `vision_description` into context alongside RAG blocks.
+**Status:** Completed in Phase 21
+- Backend:
+  - `POST /attachments/upload` endpoint in `app/api/attachments.py`.
+  - `save_and_analyze_attachment` in `app/services/attachment_service.py`: runs Azure OpenAI GPT-4.1-mini Multimodal Vision on student images, transcribing math, questions, and extracting visual descriptions.
+  - Injected `[Student Uploaded Attachment(s)]` visual descriptions and transcribed text into prompt context in `app/services/chat_orchestrator.py`.
+  - Saved attachment nodes as `MessageContentBlock(block_type='image')` linked to messages.
+  - Served static attachments via FastAPI `/uploads/attachments`.
+- Frontend:
+  - Paperclip attachment button in `ChatArea.jsx`.
+  - Preview chip row with thumbnail and remove button above the input bar.
+  - Attached image cards rendered in message bubbles with click-to-preview fullscreen Lightbox modal.
 
 ---
 
-## 4. Real-Time Cross-Device Sync
+## 4. Real-Time Cross-Device Sync — COMPLETED
 
-**Priority:** Low
-**Deferred because:** Requires WebSocket or Supabase Realtime setup.
+**Status:** Completed in Phase 22
+- Backend:
+  - `SyncConnectionManager` in `app/services/sync_service.py` manages active user WebSockets with thread-safe `broadcast_to_user` and non-blocking `sync_broadcast` for background pipelines and sync handlers.
+  - WebSocket endpoint `WS /sync/ws?token=<jwt>` in `app/api/sync.py` with heartbeat `ping`/`pong` protocol and status/broadcast endpoints.
+  - Dispatches `message_received` upon chat orchestrator turn completion, `quiz_completed` upon quiz completion, and `space_updated` upon study space updates.
+- Frontend:
+  - `SyncContext.jsx` provides `useSync()` hook with automatic `ws://` / `wss://` connection, 25s ping heartbeats, exponential backoff reconnection, and real-time event dispatching.
+  - Automatic message deduplication and instant real-time session reflection across multiple tabs/devices without page reload.
+  - Real-time sync badge in `ChatArea.jsx` indicating Live Sync connection status and cross-device sync activity.
 
 ---
 

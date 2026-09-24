@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
 import {
   CheckCircle2, XCircle, ChevronRight, Trophy, BookOpen,
-  Loader2, Lightbulb, Target
+  Loader2, Lightbulb, Target, X
 } from 'lucide-react';
 
 /**
@@ -33,24 +33,28 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
   const [results, setResults] = useState(null);     // FinishQuizResponse
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [resolvedTopic, setResolvedTopic] = useState(topic || '');
 
   // Generate quiz on mount
   useEffect(() => {
     (async () => {
       try {
+        const studentId = student?.user_id || student?.id || student?.student_id || '';
         const data = await quizApi.generate({
-          student_id: student.student_id,
-          subject,
-          topic,
-          source,
-          session_id: sessionId,
-          num_questions: numQuestions,
+          student_id: studentId,
+          subject: subject || 'Science',
+          topic: topic || '',
+          source: source || 'manual',
+          session_id: sessionId || '',
+          num_questions: numQuestions || 7,
         });
         setAttemptId(data.attempt_id);
-        setQuestions(data.questions);
+        setQuestions(data.questions || []);
+        if (data.topic) setResolvedTopic(data.topic);
         setPhase('quiz');
       } catch (e) {
-        setError('Failed to load quiz. Please try again.');
+        console.error('Quiz generation failed:', e);
+        setError(e.response?.data?.detail || 'Failed to load quiz. Please try again.');
         setPhase('error');
       }
     })();
@@ -209,7 +213,18 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
             <Target size={16} className="text-indigo-400" />
             <span className="text-xs font-bold text-indigo-300 uppercase tracking-wider">Quiz · {subject}</span>
           </div>
-          <span className="text-xs text-gray-400">Q{currentIndex + 1} / {questions.length}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400">Q{currentIndex + 1} / {questions.length}</span>
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors ml-1"
+                title="Close Quiz"
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
         </div>
         {/* Progress bar */}
         <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
@@ -218,7 +233,7 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
             style={{ width: `${((currentIndex) / questions.length) * 100}%` }}
           />
         </div>
-        <p className="text-gray-400 text-xs mt-2 truncate">📚 {topic}</p>
+        <p className="text-gray-400 text-xs mt-2 truncate">📚 {resolvedTopic || topic || (subject + ' Review')}</p>
       </div>
 
       {/* Question */}

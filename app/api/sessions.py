@@ -91,12 +91,16 @@ def get_session_history(
 
     recent_messages = []
     for m in messages:
-        tb = db.query(MessageContentBlock).filter(
-            MessageContentBlock.message_id == m.id,
-            MessageContentBlock.block_type == "text"
-        ).first()
+        blocks = db.query(MessageContentBlock).filter(
+            MessageContentBlock.message_id == m.id
+        ).order_by(MessageContentBlock.block_index.asc()).all()
+        tb = next((b for b in blocks if b.block_type == "text"), None)
         content = tb.content if tb else ""
         meta = tb.extra_data if tb and tb.extra_data else {}
+        attachments = [
+            b.extra_data for b in blocks 
+            if b.block_type in ("image", "document") and b.extra_data
+        ]
         sibs = siblings_map.get((m.parent_message_id, m.role), [str(m.id)])
         idx = sibs.index(str(m.id)) if str(m.id) in sibs else 0
         recent_messages.append({
@@ -108,6 +112,7 @@ def get_session_history(
             "sibling_ids": sibs,
             "sibling_index": idx,
             "sibling_count": len(sibs),
+            "attachments": attachments,
             "sources": meta.get("sources", []),
             "chapter": meta.get("chapter", ""),
             "topic": meta.get("topic", ""),

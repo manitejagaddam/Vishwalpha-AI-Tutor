@@ -91,6 +91,12 @@ def create_space(
     db.commit()
     db.refresh(space)
 
+    try:
+        from app.services.sync_service import sync_manager
+        sync_manager.sync_broadcast(str(current_user.id), "space_updated", {"action": "created", "space_id": str(space.id)})
+    except Exception:
+        pass
+
     return {
         "id": str(space.id),
         "title": space.title,
@@ -124,6 +130,13 @@ def update_space(
         space.is_archived = body.is_archived
 
     db.commit()
+
+    try:
+        from app.services.sync_service import sync_manager
+        sync_manager.sync_broadcast(str(current_user.id), "space_updated", {"action": "updated", "space_id": str(space.id)})
+    except Exception:
+        pass
+
     return {
         "id": str(space.id),
         "title": space.title,
@@ -148,4 +161,11 @@ def delete_space(
 
     space.is_archived = True
     db.commit()
+
+    try:
+        from app.services.sync_service import sync_manager
+        sync_manager.sync_broadcast(str(current_user.id), "space_updated", {"action": "deleted", "space_id": str(space.id)})
+    except Exception:
+        pass
+
     return {"status": "ok", "message": "Study space deleted"}
