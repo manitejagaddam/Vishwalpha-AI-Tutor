@@ -10,7 +10,6 @@ import shutil
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 
 from app.schemas import IngestRequest, IngestResponse, IngestLogResponse
-from app.services.ingestion_pipeline import IngestionPipeline
 from app.api.deps import verify_admin_key
 from app.data.database import managed_session
 from app.data.models.content import BookIngestionLog, Book
@@ -34,6 +33,7 @@ async def ingest_pdf(
     Ingests a textbook PDF chapter into the curriculum database.
     Requires X-Admin-Key header.
     """
+    from app.services.ingestion_pipeline import IngestionPipeline
     pipeline = IngestionPipeline()
     fd, temp_path = tempfile.mkstemp(suffix=".pdf")
     try:

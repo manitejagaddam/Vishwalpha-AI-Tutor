@@ -28,7 +28,7 @@ WORKDIR /app
 COPY requirements-prod.txt ./
 
 # Install Python dependencies into system environment
-RUN uv pip install --system --no-cache -r requirements-prod.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy backend application source code
 COPY app/ ./app/
