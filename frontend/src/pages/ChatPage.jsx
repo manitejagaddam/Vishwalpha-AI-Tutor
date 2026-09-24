@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { useSession } from '../context/SessionContext';
 import Sidebar from '../components/Sidebar/Sidebar';
@@ -17,11 +17,15 @@ if (typeof window !== 'undefined') {
 }
 
 export default function ChatPage() {
-  const { showContext, subject, sessionId } = useSession();
+  const { showContext, subject, sessionId, endSession } = useSession();
+
+  // Track previous sessionId so we can end the correct session on switch
+  const prevSessionIdRef = useRef(sessionId);
 
   // Lifted quiz state — shared between Sidebar button and ChatArea
   const [activeQuiz, setActiveQuiz] = useState(null);
 
+  // ── Purge corrupted layouts on mount ──────────────────────────────────────
   useEffect(() => {
     try {
       Object.keys(localStorage).forEach(key => {
@@ -31,6 +35,32 @@ export default function ChatPage() {
       });
     } catch (_) {}
   }, []);
+
+  // ── Trigger session/end on app close / tab close ───────────────────────────
+  useEffect(() => {
+    const handleUnload = () => {
+      // Use the ref so we always have the latest sessionId even during teardown
+      if (prevSessionIdRef.current) {
+        endSession(prevSessionIdRef.current);
+      }
+    };
+    window.addEventListener('pagehide', handleUnload);   // mobile + bfcache
+    window.addEventListener('beforeunload', handleUnload); // desktop
+    return () => {
+      window.removeEventListener('pagehide', handleUnload);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [endSession]);
+
+  // ── Trigger session/end when switching conversations ───────────────────────
+  useEffect(() => {
+    const prev = prevSessionIdRef.current;
+    if (prev && prev !== sessionId) {
+      // End the previous conversation session before switching
+      endSession(prev);
+    }
+    prevSessionIdRef.current = sessionId;
+  }, [sessionId, endSession]);
 
   const handleStartQuiz = ({ topic, subject: sub, source = 'manual' }) => {
     setActiveQuiz({
@@ -44,6 +74,11 @@ export default function ChatPage() {
 
   const handleQuizClose = () => setActiveQuiz(null);
 
+  // ── New Chat: end current session before clearing ──────────────────────────
+  const handleNewChat = () => {
+    if (sessionId) endSession(sessionId);
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-transparent">
       {/* 
@@ -56,7 +91,7 @@ export default function ChatPage() {
         
         {/* Left Sidebar Panel (Ratio: 1 part = 16.67%) */}
         <Panel defaultSize={1667} minSize={12} maxSize={300}>
-          <Sidebar onStartQuiz={handleStartQuiz} />
+          <Sidebar onStartQuiz={handleStartQuiz} onNewChat={handleNewChat} />
         </Panel>
 
         <PanelResizeHandle className="w-1.5 bg-black/20 hover:bg-indigo-500/50 transition-colors duration-200 cursor-col-resize flex flex-col justify-center items-center group relative z-10">

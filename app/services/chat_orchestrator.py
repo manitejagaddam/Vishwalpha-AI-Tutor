@@ -64,6 +64,7 @@ from app.data.cognitive_repo import (
     get_student_weak_topics,
     get_topics_due_for_review,
     get_learning_preferences,
+    llm_update_cognitive_profile,
 )
 from app.config import settings
 from app.services.tutor_llm import TutorLLM
@@ -88,23 +89,103 @@ def _get_session_cache() -> RetrievalCache:
     return _session_cache
 
 
-def run_deep_session_sync(user_id: str, subject_id: int | None, conversation_id: str, context_snippet: str) -> None:
+def run_deep_session_sync(
+    user_id: str,
+    subject_id: int | None,
+    conversation_id: str,
+    context_snippet: str,
+) -> None:
     """
-    Runs heavy deep sync operations in the background without blocking the chat response.
-    Updates student memory, weak topics, and learning preferences, then invalidates the session cache.
+    Runs ALL heavy end-of-session operations in the background thread.
+    Triggered by:
+      - POST /chat/session/end (explicit, on every chat/session switch, new chat, app close)
+      - SESSION_SYNC_THRESHOLD_MINUTES timer (every 30 min during long sessions)
+
+    Steps:
+      1. Generate session remark + update student memory (LLM)
+      2. Generate + write SessionInsight (topics mastered/struggled, summary, recommendations)
+      3. Generate + write StudentTask rows from recommendations
+      4. LLM-analyse full conversation and apply metric deltas
+      5. Invalidate session cache so next turn reads fresh data
     """
     try:
         llm = _get_llm()
+        sid_int = int(subject_id) if subject_id else 0
+
+        # Fetch full conversation history for LLM analysis
+        full_history: list[dict] = []
+        subject_name = ""
+        try:
+            with managed_session() as db:
+                full_history = get_message_history(db, conversation_id, limit=40)
+                if subject_id:
+                    from app.data.models.content import Subject as SubjectModel
+                    sub = db.query(SubjectModel).filter(SubjectModel.id == subject_id).first()
+                    if sub:
+                        subject_name = sub.name
+        except Exception as e:
+            logger.warning(f"[DeepSync] Failed to fetch full history: {e}")
+
+        # ── Step 1: Memory update ─────────────────────────────────────────────
         remark = llm.generate_remark(context_snippet)
         if remark:
             update_session_remark(conversation_id, remark)
             update_student_memory(user_id, subject_id, remark, context_snippet)
-        
-        # Here we can add learning preference updates if needed in the future
-        
-        # Invalidate the session state so the next turn reads the fresh memory, prefs, and weak topics
-        sid_int = int(subject_id) if subject_id else 0
+
+        # ── Step 2: Session Insight ───────────────────────────────────────────
+        if full_history and len(full_history) >= 2:
+            try:
+                insight_data = llm.generate_session_insight(full_history, subject=subject_name)
+                if insight_data:
+                    from app.data.models.learning import SessionInsight
+                    import uuid as _uuid
+                    with managed_session() as db:
+                        db.add(SessionInsight(
+                            id=_uuid.uuid4(),
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                            subject_id=subject_id,
+                            topics_mastered=insight_data.get("topics_mastered", []),
+                            topics_struggled=insight_data.get("topics_struggled", []),
+                            misconceptions_found=insight_data.get("misconceptions_found", []),
+                            bloom_levels_achieved=insight_data.get("bloom_levels_achieved"),
+                            engagement_rating=insight_data.get("engagement_rating"),
+                            session_summary=insight_data.get("session_summary", ""),
+                            recommendations=insight_data.get("recommendations", []),
+                        ))
+                    logger.info(f"[DeepSync] SessionInsight written for conv {conversation_id}")
+
+                    # ── Step 3: Student Tasks from recommendations ────────────
+                    recommendations = insight_data.get("recommendations", [])
+                    if recommendations:
+                        from app.data.models.learning import StudentTask
+                        with managed_session() as db:
+                            for rec in recommendations[:3]:  # max 3 tasks per session
+                                if isinstance(rec, str) and rec.strip():
+                                    db.add(StudentTask(
+                                        user_id=user_id,
+                                        subject_id=subject_id,
+                                        task=rec.strip(),
+                                        is_done=False,
+                                    ))
+                        logger.info(f"[DeepSync] {len(recommendations[:3])} StudentTask(s) created")
+
+            except Exception as e:
+                logger.warning(f"[DeepSync] SessionInsight/Task generation failed: {e}", exc_info=True)
+
+        # ── Step 4: LLM-based cognitive metric update ─────────────────────────
+        if full_history and subject_id:
+            try:
+                llm_signals = llm.generate_llm_metric_signals(full_history)
+                if llm_signals:
+                    llm_update_cognitive_profile(user_id, subject_id, llm_signals)
+                    logger.info(f"[DeepSync] LLM metric signals applied: {list(llm_signals.keys())}")
+            except Exception as e:
+                logger.warning(f"[DeepSync] LLM metric update failed: {e}")
+
+        # ── Step 5: Invalidate session cache ──────────────────────────────────
         _get_session_cache().invalidate_session_state(user_id, sid_int)
+
     except Exception as e:
         logger.error(f"Deep session sync failed: {e}", exc_info=True)
 

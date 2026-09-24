@@ -28,6 +28,7 @@ from app.data.models.learning import (
     OverallCognitiveProfile,
     PendingMetricSignal,
     TopicMastery,
+    MasteryEvent,
     StudentStreak,
     LearningPreference,
 )
@@ -540,6 +541,7 @@ def update_topic_mastery_from_chat(
     """
     Updates topic mastery after a chat turn about this topic.
     Increments visit count, updates bloom level, and adjusts mastery.
+    Appends a MasteryEvent for audit trail and sparkline charts.
     """
     bloom_map = {
         "remember": 1, "understand": 2, "apply": 3,
@@ -558,7 +560,19 @@ def update_topic_mastery_from_chat(
 
         # Nudge mastery up based on engagement (small increments per chat turn)
         mastery_boost = min(3.0, bloom_num * 0.8)
-        mastery.mastery_level = _clamp((mastery.mastery_level or 0) + mastery_boost)
+        old_mastery = mastery.mastery_level or 0
+        mastery.mastery_level = _clamp(old_mastery + mastery_boost)
+
+        # ── Append MasteryEvent for audit trail ───────────────────────────────
+        db.flush()  # ensure mastery.id exists
+        db.add(MasteryEvent(
+            mastery_id=mastery.id,
+            user_id=user_id,
+            topic_id=topic_id,
+            source="chat",
+            delta=mastery_boost,
+            new_value=mastery.mastery_level,
+        ))
 
 
 def update_topic_mastery_from_quiz(
@@ -567,6 +581,8 @@ def update_topic_mastery_from_quiz(
     """
     Updates topic mastery after a quiz on this topic.
     Quiz results have a stronger impact than chat signals.
+    Also bumps knowledge_retention and learning_velocity on the subject profile.
+    Appends a MasteryEvent for audit trail and sparkline charts.
     """
     with managed_session() as db:
         mastery = get_or_create_topic_mastery(db, user_id, topic_id)
@@ -577,6 +593,7 @@ def update_topic_mastery_from_quiz(
         # Quiz score has strong influence on mastery
         # Weighted average: 40% existing mastery + 60% quiz score
         current = mastery.mastery_level or 0
+        old_mastery = current
         mastery.mastery_level = _clamp(current * 0.4 + quiz_score * 0.6)
 
         # Update bloom level based on score
@@ -589,6 +606,42 @@ def update_topic_mastery_from_quiz(
 
         # Schedule next review using spaced repetition
         _schedule_spaced_review(mastery, quiz_score, passed)
+
+        # ── Append MasteryEvent for audit trail ───────────────────────────────
+        db.flush()  # ensure mastery.id exists
+        delta = mastery.mastery_level - old_mastery
+        db.add(MasteryEvent(
+            mastery_id=mastery.id,
+            user_id=user_id,
+            topic_id=topic_id,
+            source="quiz",
+            delta=delta,
+            new_value=mastery.mastery_level,
+        ))
+
+        # ── Update knowledge_retention and learning_velocity via subject profile ─
+        # We need the topic's subject_id to find the right subject profile
+        from app.data.models.content import Topic as TopicModel, Chapter, Book
+        topic_obj = db.query(TopicModel).filter(TopicModel.id == topic_id).first()
+        if topic_obj:
+            chapter = db.query(Chapter).filter(Chapter.id == topic_obj.chapter_id).first()
+            if chapter:
+                book = db.query(Book).filter(Book.id == chapter.book_id).first()
+                if book and book.subject_id:
+                    subject_id = book.subject_id
+                    # knowledge_retention: proportional to quiz score (0-100)
+                    # delta is bounded to prevent wild swings
+                    kr_delta = _clamp((quiz_score - 50) * 0.1, -3.0, 5.0)  # -3 to +5 per quiz
+                    # learning_velocity: based on mastery gain speed (delta / visits)
+                    visits = mastery.times_visited or 1
+                    lv_delta = _clamp(delta / visits * 10, -2.0, 5.0)
+                    profile = _get_or_create_profile(db, user_id, subject_id)
+                    profile.knowledge_retention = _clamp(
+                        (profile.knowledge_retention or 50.0) + kr_delta
+                    )
+                    profile.learning_velocity = _clamp(
+                        (profile.learning_velocity or 50.0) + lv_delta
+                    )
 
 
 def _schedule_spaced_review(
@@ -872,3 +925,19 @@ def nudge_learning_preference(user_id: str, key: str, delta: float) -> None:
         if hasattr(pref, key):
             current = getattr(pref, key) or 0.5
             setattr(pref, key, _clamp(current + delta, 0.0, 1.0))
+
+
+def llm_update_cognitive_profile(user_id: str, subject_id: int, llm_signals: dict) -> dict:
+    """
+    Applies LLM-derived metric delta signals directly to the subject profile.
+    Called during deep session sync to complement the per-turn regex batch update.
+    llm_signals: dict of metric_key -> delta (float, positive or negative)
+    Returns the adjustments applied.
+    """
+    if not llm_signals:
+        return {}
+    with managed_session() as db:
+        adjustments = {k: {"delta": v} for k, v in llm_signals.items()}
+        applied = update_subject_profile(db, user_id, subject_id, adjustments, source="llm_sync")
+        _update_overall_profile(db, user_id)
+        return applied

@@ -21,7 +21,7 @@ function sessionTitle(s) {
   return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) + ' Chat';
 }
 
-export default function Sidebar({ onStartQuiz }) {
+export default function Sidebar({ onStartQuiz, onNewChat }) {
   const { student, logout } = useAuth();
   const { 
     subject, setSubject, 
@@ -169,7 +169,13 @@ export default function Sidebar({ onStartQuiz }) {
             <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest flex items-center gap-1.5">
               <Clock size={12} className="text-blue-400" /> Past Sessions
             </label>
-            <button onClick={() => loadSession('')} className="bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-3 py-1 rounded-full text-xs font-bold transition-all border border-indigo-500/30 hover:scale-105">
+            <button
+              onClick={() => {
+                if (onNewChat) onNewChat();
+                loadSession('');
+              }}
+              className="bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-3 py-1 rounded-full text-xs font-bold transition-all border border-indigo-500/30 hover:scale-105"
+            >
               + New
             </button>
           </div>

@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './AuthContext';
 import { studentApi, chatApi, spacesApi } from '../api/client';
+import client from '../api/client';
 
 const SessionContext = createContext();
 
@@ -105,6 +106,27 @@ export const SessionProvider = ({ children }) => {
     }
   }, [sessionId, loadSession]);
 
+  /**
+   * endSession — fire-and-forget POST /chat/session/end.
+   * Call whenever the user:
+   *   - switches to a different conversation
+   *   - clicks "New Chat"
+   *   - closes / navigates away from the app
+   * The backend runs the Deep Session Sync (memory, insights, tasks, LLM metrics)
+   * in a background thread so the UI is never blocked.
+   */
+  const endSession = useCallback((overrideSessionId, overrideSubjectId) => {
+    const sid = overrideSessionId || sessionId;
+    const subj = overrideSubjectId !== undefined ? overrideSubjectId : null;
+    if (!sid || !student) return;
+    // Extract numeric subject_id if subject is a string name
+    const payload = { conversation_id: sid };
+    if (subj !== null) payload.subject_id = subj;
+    // Fire-and-forget — we don't await so it never blocks UI
+    client.post('/chat/session/end', payload).catch(() => {});
+  }, [sessionId, student]);
+
+
   useEffect(() => {
     if (student) {
       refreshProfile();
@@ -134,7 +156,8 @@ export const SessionProvider = ({ children }) => {
       refreshProfile,
       sessionRemark, setSessionRemark,
       metricsAdjustments, setMetricsAdjustments,
-      loadSession
+      loadSession,
+      endSession,
     }}>
       {children}
     </SessionContext.Provider>
