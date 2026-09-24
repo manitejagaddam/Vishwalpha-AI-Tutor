@@ -127,6 +127,8 @@ export const SessionProvider = ({ children }) => {
   }, [sessionId, student]);
 
 
+  // Initial load when student logs in — runs once on mount/login.
+  // Subject/space changes trigger individual refreshes via their own hooks below.
   useEffect(() => {
     if (student) {
       refreshProfile();
@@ -134,7 +136,25 @@ export const SessionProvider = ({ children }) => {
       refreshSpaces();
       refreshMemory();
     }
-  }, [student, refreshProfile, refreshSessions, refreshSpaces, refreshMemory]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [student?.id ?? student]);  // only re-run on login/logout, not on every callback identity change
+
+  // Re-fetch subject-scoped data whenever subject changes
+  useEffect(() => {
+    if (student) {
+      refreshProfile();
+      refreshSessions();
+      refreshSpaces();
+      refreshMemory();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subject]);
+
+  // Re-fetch sessions when active space filter changes
+  useEffect(() => {
+    if (student) refreshSessions();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSpaceId]);
 
   return (
     <SessionContext.Provider value={{

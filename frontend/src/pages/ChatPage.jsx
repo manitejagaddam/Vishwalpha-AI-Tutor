@@ -25,7 +25,8 @@ export default function ChatPage() {
   // Lifted quiz state — shared between Sidebar button and ChatArea
   const [activeQuiz, setActiveQuiz] = useState(null);
 
-  // ── Purge corrupted layouts on mount ──────────────────────────────────────
+  // ── Purge corrupted layouts on mount (deduplicates the module-scope effect above) ──
+  // Intentionally kept here too so it still fires correctly in strict mode / hot reload.
   useEffect(() => {
     try {
       Object.keys(localStorage).forEach(key => {
@@ -89,8 +90,8 @@ export default function ChatPage() {
       */}
       <PanelGroup orientation="horizontal">
         
-        {/* Left Sidebar Panel (Ratio: 1 part = 16.67%) */}
-        <Panel defaultSize={1667} minSize={12} maxSize={300}>
+        {/* Left Sidebar Panel (Ratio: 1 part ≈ 17%) */}
+        <Panel defaultSize={17} minSize={12} maxSize={30}>
           <Sidebar onStartQuiz={handleStartQuiz} onNewChat={handleNewChat} />
         </Panel>
 
@@ -113,7 +114,7 @@ export default function ChatPage() {
             <PanelResizeHandle className="w-1.5 bg-black/20 hover:bg-indigo-500/50 transition-colors duration-200 cursor-col-resize flex flex-col justify-center items-center group relative z-10">
               <div className="h-8 w-1 rounded-full bg-white/20 group-hover:bg-indigo-300 transition-colors" />
             </PanelResizeHandle>
-            <Panel defaultSize={3333} minSize={20} maxSize={500}>
+            <Panel defaultSize={33} minSize={20} maxSize={50}>
               <ContextPanel />
             </Panel>
           </>

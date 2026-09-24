@@ -90,7 +90,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     setYesterdayCtx(null);
     setYesterdayBannerDismissed(false);
 
-    quizApi.getYesterdayContext(studentId)
+    quizApi.getYesterdayContext()  // no args — endpoint resolves student from JWT
       .then(data => {
         if (data?.topic) {
           setYesterdayCtx(data);
@@ -98,7 +98,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         }
       })
       .catch(() => {});
-  }, [student?.student_id, subject]);
+  }, [student?.id, subject]);  // use student.id not student_id which may be undefined
 
   // ── Attachment handlers (Addon #3) ─────────────────────────────────────────
   const handleFileSelect = async (e) => {
@@ -214,8 +214,9 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
             // Deduplicate across array so the message ID and client ID never create two bubbles
             const seenIds = new Set();
             const deduplicated = [];
-            for (const msg of newMsgs) {
-              const key = msg.id || `${msg.role}-${msg.content?.slice(0, 30)}`;
+            for (const [idx, msg] of newMsgs.entries()) {
+              // Use index as tiebreaker so identical-content messages are never collapsed
+              const key = msg.id && msg.id !== clientTempId ? msg.id : `__idx_${idx}`;
               if (seenIds.has(key)) continue;
               seenIds.add(key);
               deduplicated.push(msg);
@@ -595,13 +596,18 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
                         </div>
                       </div>
                     ) : (
-                      /* Markdown Content */
+                      /* Content: stream as plain text during generation, render Markdown when done */
                       <div className={`markdown-content [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_p]:mb-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_li]:mb-1 [&_table]:w-full [&_table]:border-collapse [&_table]:mb-4 [&_table]:text-sm [&_th]:border [&_th]:border-white/20 [&_th]:p-2 [&_th]:bg-white/10 [&_td]:border [&_td]:border-white/10 [&_td]:p-2 [&_blockquote]:border-l-4 [&_blockquote]:border-indigo-400 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:text-gray-300 [&_strong]:font-bold [&_code]:bg-black/30 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded text-[15px] leading-relaxed ${
                         msg.role === 'student' ? '[&_strong]:text-white' : '[&_strong]:text-indigo-200'
                       }`}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
-                        </ReactMarkdown>
+                        {msg.isStreaming ? (
+                          /* Raw text during streaming — avoids ReactMarkdown re-parsing every token */
+                          <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                        ) : (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        )}
                       </div>
                     )}
 

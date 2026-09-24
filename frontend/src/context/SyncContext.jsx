@@ -13,7 +13,7 @@ export function SyncProvider({ children }) {
     refreshSessions, 
     refreshProfile, 
     refreshMemory,
-    loadStudySpaces,
+    refreshSpaces,  // was incorrectly named 'loadStudySpaces' — does not exist in SessionContext
   } = useSession();
 
   const [isConnected, setIsConnected] = useState(false);
@@ -110,7 +110,7 @@ export function SyncProvider({ children }) {
             refreshMemory();
             refreshSessions();
           } else if (eventName === 'space_updated') {
-            loadStudySpaces();
+            refreshSpaces();
           } else if (eventName === 'typing') {
             setRemoteTyping(true);
             setTimeout(() => setRemoteTyping(false), 3000);
@@ -128,6 +128,13 @@ export function SyncProvider({ children }) {
         setIsConnected(false);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
 
+        // Stop retrying after 10 attempts (~2.5 min total) to avoid storm when backend is down
+        const MAX_RETRIES = 10;
+        if (retryCountRef.current >= MAX_RETRIES) {
+          console.debug('[RealTime Sync] Max retries reached, giving up reconnect.');
+          return;
+        }
+
         // Exponential backoff reconnection up to 15s
         const backoff = Math.min(1000 * Math.pow(1.5, retryCountRef.current), 15000);
         retryCountRef.current += 1;
@@ -140,7 +147,7 @@ export function SyncProvider({ children }) {
     } catch (err) {
       console.debug('[RealTime Sync] Failed to initialize WebSocket:', err);
     }
-  }, [student?.access_token, refreshSessions, refreshProfile, refreshMemory, loadStudySpaces, setMessages]);
+  }, [student?.access_token, refreshSessions, refreshProfile, refreshMemory, refreshSpaces, setMessages]);
 
   useEffect(() => {
     if (student?.access_token) {
