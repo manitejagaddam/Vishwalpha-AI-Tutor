@@ -30,3 +30,5 @@ slowapi>=0.1.10
 # File uploads
 python-multipart>=0.0.9
 aiofiles>=24.1.0
+
+httpx
