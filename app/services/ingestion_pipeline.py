@@ -49,14 +49,19 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 from PyPDF2 import PdfReader
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.data.database import managed_session
 from app.data.models.content import (
     BlockEmbedding, Board, Book, BookIngestionLog, Chapter,
-    ContentBlock, SchoolClass, Subject, Topic, Subtopic, Activity
+    ContentBlock, ContentRawArchive, SchoolClass, Subject, Topic, Subtopic, Activity
 )
 from app.data.models.learning import TopicPrerequisite
 from app.infra.azure_openai_client import get_openai
@@ -74,7 +79,10 @@ MIN_TEXT_PER_PAGE      = 50                    # chars; below -> OCR
 MIN_SECTION_CHARS      = 80                    # quality gate
 CONFIDENCE_THRESHOLD   = 0.5                   # below -> skip section
 RAW_CHUNK_SIZE         = 4000                  # chars sent to LLM
-SUB_CHUNK_SIZE         = 800                   # chars per ContentBlock
+# SUB_CHUNK_SIZE was removed (2026-09-23) — chunking has been eliminated.
+# Each LLM section is stored as ONE ContentBlock (no sub-chunking).
+# Do NOT re-introduce chunking here. Constant kept only to avoid import errors.
+SUB_CHUNK_SIZE         = 800                   # DEPRECATED — no longer used
 INGEST_DUP_TTL         = 60 * 60 * 24 * 365   # 1 year duplicate TTL
 OCR_LOW_CONF_THRESHOLD = 60.0                  # avg OCR confidence %
 HEADER_FOOTER_FREQ     = 0.5                   # >50% pages = header/footer
@@ -102,13 +110,29 @@ STEP 2 — SEGMENT:
 - Classify each section's content_type as one of: "concept", "activity", "example", "question", "equation_block", "table".
 
 STEP 3 — STRUCTURE each section as JSON with these fields:
-- heading: the section's title, cleaned.
+- heading: a specific, descriptive title that names what this section is *about*, derived from the
+  actual content — never a bare structural label such as "Activity 1.5", "Step III", "Questions",
+  "Example 3", or "Figures", even when the source text opens with such a label. Generate the title
+  from the content itself.
+  Guidelines by content_type:
+    • concept       → state the main idea or principle the text explains.
+    • activity      → name what phenomenon or concept the activity investigates.
+    • example       → name the concept being demonstrated with the example.
+    • question      → name the concept the questions are testing.
+    • table         → describe what the table compares or lists.
+    • equation_block → name the relationship or law being expressed.
+  Generic examples across subjects (✓ correct | ✗ wrong — apply the same logic to ANY subject):
+    ✓ "Properties of Rational Numbers"          (Maths)     — not "Exercise 1.1"
+    ✓ "Causes of the French Revolution"         (History)   — not "Questions"
+    ✓ "Distribution of Natural Vegetation"      (Geography) — not "Figures"
+    ✓ "Verification of Triangle Congruence"     (Maths)     — not "Activity 3"
+    ✓ "Role of Stomata in Transpiration"        (Biology)   — not "Step II"
+    ✓ "Supply and Demand Curve Comparison"      (Economics) — not "Table 4"
 - content_type: one of the types above.
 - repaired_text: the full cleaned text of the section (equations preserved exactly, per STEP 1).
-- summary: 1-2 sentences of factual, declarative, bookish content — state the facts directly.
+- summary: 5 - 6 sentences of factual, declarative, bookish content — state the facts directly.
   Do NOT write meta-descriptions like "This section explains...", "This activity demonstrates...",
-  "The text introduces...". Example of correct style: "A chemical reaction involves changes in state,
-  color, or temperature. Magnesium burns in air to form magnesium oxide."
+  "The text introduces...". State what the section actually says, as if writing an encyclopedia entry.
 - keywords: 3-8 specific terms actually present in this section's content (not generic subject words).
 - prerequisites: only concepts that are DIRECTLY implied or referenced by this section's content.
   Do not infer generic "prior knowledge" that isn't textually grounded — if none are clearly implied,
@@ -286,23 +310,65 @@ def _get_or_create_chapter(
 
 
 def _upsert_topic(
-    db: Session, chapter_id: int, title: str,
+    db: Session, chapter_id: int, chap_nk: str, title: str,
     order: int, topic_number: str | None = None,
 ) -> Topic:
+    """
+    Upsert a Topic row.
+
+    natural_key = "{chap_nk}_{slug}" where chap_nk is the chapter's own
+    natural_key (e.g. NCERT_10_Science_en_2023_ch1).  This makes the topic
+    natural_key globally unique across ALL classes, subjects, and boards.
+
+    Using bare chapter_num (1, 2, 13) as a prefix would collide the moment two
+    different subjects have a topic with the same title in the same chapter
+    number — e.g. both Class 9 History Ch1 and Class 10 Maths Ch1 produce
+    a topic called 'Introduction' → ch1_introduction conflicts.
+
+    Two-step approach to safely handle two independent unique constraints
+    (natural_key AND uq_topics_chapter_num) without a race condition:
+      Step 1 — INSERT without topic_number; ON CONFLICT (natural_key) DO UPDATE.
+      Step 2 — UPDATE topic_number only if no other row in the chapter already
+               holds that value (silently skips on collision).
+    """
     slug = re.sub(r"[^a-z0-9]+", "_", title.lower())[:80]
-    nk   = f"ch{chapter_id}_{slug}"
-    obj  = db.query(Topic).filter(Topic.natural_key == nk).first()
-    if not obj:
-        obj = Topic(
-            chapter_id=chapter_id, title=title, display_order=order,
-            natural_key=nk, topic_number=topic_number,
-        )
-        db.add(obj); db.flush()
-    else:
-        obj.display_order = order
-        if topic_number:
-            obj.topic_number = topic_number
-    return obj
+    nk   = f"{chap_nk}_{slug}"
+
+    # Step 1: idempotent upsert keyed on natural_key only.
+    db.execute(text("""
+        INSERT INTO topics
+            (chapter_id, title, natural_key, display_order, prompt_version)
+        VALUES
+            (:chapter_id, :title, :nk, :display_order, :pv)
+        ON CONFLICT (natural_key)
+        DO UPDATE SET
+            title         = EXCLUDED.title,
+            display_order = EXCLUDED.display_order
+    """), {
+        "chapter_id":    chapter_id,
+        "title":         title,
+        "nk":            nk,
+        "display_order": order,
+        "pv":            PROMPT_VERSION,
+    })
+    db.flush()
+
+    # Step 2: set topic_number only when it won't collide.
+    if topic_number is not None:
+        db.execute(text("""
+            UPDATE topics
+               SET topic_number = :tn
+             WHERE natural_key  = :nk
+               AND NOT EXISTS (
+                       SELECT 1 FROM topics t2
+                        WHERE t2.chapter_id   = :chapter_id
+                          AND t2.topic_number = :tn
+                          AND t2.natural_key != :nk
+               )
+        """), {"tn": topic_number, "nk": nk, "chapter_id": chapter_id})
+        db.flush()
+
+    return db.query(Topic).filter(Topic.natural_key == nk).one()
 
 
 def _upsert_subtopic(db: Session, topic_id: int, title: str, order: int) -> Subtopic:
@@ -373,17 +439,19 @@ def _upsert_block(
         if prerequisites: blk.enriched_prerequisites = prerequisites
 
     if vec is not None:
-        emb = db.query(BlockEmbedding).filter(
-            BlockEmbedding.block_id == blk.id,
-            BlockEmbedding.embedding_model == settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
-        ).first()
-        if emb:
-            emb.embedding = vec
-        else:
-            db.add(BlockEmbedding(
-                block_id=blk.id, embedding=vec,
-                embedding_model=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
-            ))
+        # Raw SQL ON CONFLICT avoids uq_block_embeddings_block_model on re-runs.
+        # Inline the vector literal: SQLAlchemy text() parser chokes on :param::vector.
+        vec_str = "[" + ",".join(str(x) for x in vec) + "]"
+        db.execute(text(f"""
+            INSERT INTO block_embeddings (block_id, embedding, embedding_model)
+            VALUES (:block_id, '{vec_str}'::vector, :model)
+            ON CONFLICT (block_id, embedding_model)
+            DO UPDATE SET embedding = EXCLUDED.embedding
+        """), {
+            "block_id": blk.id,
+            "model":    settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+        })
+        db.flush()
     return blk
 
 # ---------------------------------------------------------------------------
@@ -410,6 +478,7 @@ class IngestionPipeline:
         book_natural_key: str,
         chapter_title:    str,
         chapter_number:   int,
+        json_only:        bool = False,
     ) -> dict:
         """
         17-stage trust pipeline.
@@ -420,6 +489,9 @@ class IngestionPipeline:
         t0       = time.time()
         warnings: list[str] = []
         log_id: int | None   = None
+
+        # Convert to absolute path so C extensions / fitz always locate the file
+        pdf_path = os.path.abspath(pdf_path)
 
         # Stage 0: MIME check
         if not os.path.exists(pdf_path):
@@ -453,7 +525,8 @@ class IngestionPipeline:
             sc      = _get_or_create_class(db, board.id, class_num)
             subject = _get_or_create_subject(db, sc.id, subject_name)
             book    = _get_or_create_book(db, subject.id, book_title, book_natural_key)
-            chap_nk = f"{book_natural_key}_C{chapter_number:02d}"
+            # Format matches json_to_db.py: lowercase 'ch' + no zero-padding
+            chap_nk = f"{book_natural_key}_ch{chapter_number}"
             chapter = _get_or_create_chapter(
                 db, book.id, chapter_title, chapter_number, chap_nk,
             )
@@ -469,9 +542,9 @@ class IngestionPipeline:
         try:
             result = self._run_pipeline(
                 pdf_path=pdf_path, chapter_title=chapter_title,
-                chapter_id=chapter_id_result, class_num=class_num,
-                subject_name=subject_name, page_count=page_count,
-                warnings=warnings,
+                chapter_id=chapter_id_result, chap_nk=chap_nk,
+                class_num=class_num, subject_name=subject_name,
+                page_count=page_count, warnings=warnings, json_only=json_only,
             )
         except Exception as exc:
             self._update_log(log_id, "failed", {}, None, str(exc))
@@ -576,8 +649,8 @@ class IngestionPipeline:
 
     def _run_pipeline(
         self, pdf_path: str, chapter_title: str, chapter_id: int,
-        class_num: int, subject_name: str, page_count: int,
-        warnings: list[str],
+        chap_nk: str, class_num: int, subject_name: str, page_count: int,
+        warnings: list[str], json_only: bool = False,
     ) -> dict:
 
         # Stage 6: Per-page analysis
@@ -610,18 +683,34 @@ class IngestionPipeline:
             )]
 
         # Stage 11b: LLM Restructuring
-        llm_output_data = {}
-        for sec in sections:
+        # Key = "<idx>:<heading>" to prevent collision when two sections share the same heading
+        llm_output_data: dict[str, dict] = {}
+        for sec_idx, sec in enumerate(sections):
             conf = self._score_section(sec)
             if conf < CONFIDENCE_THRESHOLD:
                 continue
             text = "\n\n".join(b.text for b in sec.blocks if b.text.strip())
+            sec_key = f"{sec_idx}:{sec.heading}"
             data = self._structure_chunk_cached(text[:RAW_CHUNK_SIZE], chapter_title)
             if data:
-                llm_output_data[sec.heading] = {
+                llm_output_data[sec_key] = {
                     "raw_blocks": [b.text for b in sec.blocks],
                     "llm_data": data
                 }
+            else:
+                # First attempt failed or wasn't cached — retry once with fresh call
+                logger.warning(f"[Ingestion] LLM data missing for '{sec.heading}', retrying once...")
+                retry_data = self._structure_chunk_cached(text[:RAW_CHUNK_SIZE], chapter_title)
+                if retry_data:
+                    logger.info(f"[Ingestion] Retry succeeded for '{sec.heading}'")
+                    llm_output_data[sec_key] = {
+                        "raw_blocks": [b.text for b in sec.blocks],
+                        "llm_data": retry_data
+                    }
+                else:
+                    # Both attempts failed — skip section entirely to protect RAG quality
+                    logger.warning(f"[Ingestion] Retry also failed for '{sec.heading}' — section will be skipped to preserve RAG quality.")
+                    warnings.append(f"LLM structuring failed (2 attempts) for '{sec.heading}' — skipped.")
 
         # Dump Debug JSON
         json_dir = os.path.dirname(pdf_path)
@@ -635,24 +724,59 @@ class IngestionPipeline:
         except Exception as e:
             logger.warning(f"[Ingestion] Failed to write debug JSON: {e}")
 
+        if json_only:
+            logger.info("[Ingestion] Stopping before database insertion because json_only is True.")
+            return {
+                "status": "json_only",
+                "sections_ingested": 0,
+                "blocks_stored": 0,
+                "chapter_id": chapter_id,
+                "warnings": warnings,
+                "message": f"Wrote JSON to {debug_path}. Stopping before DB write.",
+                "ingestion_confidence": avg_ocr / 100.0,
+                "coverage": {}
+            }
+
         # Stages 13-15: Dedup + quality gate + DB write
         # NOTE: Embeddings are computed OUTSIDE the DB session so that an OpenAI
         # timeout cannot roll back the transaction and lose already-flushed blocks.
         total_blocks = 0; skipped = 0; seen: set[str] = set()
         
         structured_topics = []
-        for sec in sections:
+        for sec_idx, sec in enumerate(sections):
             conf = self._score_section(sec)
             if conf < CONFIDENCE_THRESHOLD:
                 skipped += 1
                 warnings.append(f"Skipped '{sec.heading}' (score={conf:.2f})")
                 logger.warning(f"[Ingestion] Skipped '{sec.heading}' conf={conf:.2f}")
                 continue
-            
-            data = llm_output_data.get(sec.heading)
+
+            sec_key = f"{sec_idx}:{sec.heading}"
+            data = llm_output_data.get(sec_key)
             if data and "sections" in data["llm_data"]:
                 for llm_sec in data["llm_data"]["sections"]:
                     structured_topics.append((sec.heading, llm_sec))
+            else:
+                # LLM failed both attempts — count as skipped
+                skipped += 1
+                logger.warning(f"[Ingestion] '{sec.heading}' has no LLM data after retries — excluded from DB.")
+
+        # Deduplicate by topic title before DB write.
+        # If two LLM sections produce the same descriptive title, the second INSERT
+        # would collide on UNIQUE(topic_id, block_index=0) and roll back the whole session.
+        seen_topic_titles: set[str] = set()
+        deduped_topics = []
+        for heading, td in structured_topics:
+            title = (td.get("heading") or chapter_title).strip()
+            if title not in seen_topic_titles:
+                seen_topic_titles.add(title)
+                deduped_topics.append((heading, td))
+            else:
+                logger.warning(
+                    f"[Ingestion] Duplicate topic title '{title}' — skipping second occurrence "
+                    "to prevent UNIQUE constraint violation."
+                )
+        structured_topics = deduped_topics
                 
 
         with managed_session() as db:
@@ -663,17 +787,29 @@ class IngestionPipeline:
                 topic_summary = topic_data.get("summary", "")
                 topic_prereqs = topic_data.get("prerequisites", [])
                 topic_keywords = topic_data.get("keywords", [])
-                
+
                 level = self._classify_level(paddlex_heading)
                 subtopic_obj = None
-                
+
+                # Extract topic_number (e.g. "1.2") from the PaddleX heading
+                topic_number = None
+                m = _TOPIC_RE.match(paddlex_heading)
+                if m:
+                    topic_number = f"{m.group(1)}.{m.group(2)}" + (f".{m.group(3)}" if m.group(3) else "")
+
                 if level == 2 and last_concept_topic:
                     # Subtopic under the current topic
                     subtopic_obj = _upsert_subtopic(db, last_concept_topic.id, paddlex_heading, order)
                     topic_obj = last_concept_topic
                 else:
-                    # Normal top-level topic
-                    topic_obj = _upsert_topic(db, chapter_id, topic_title, order)
+                    # Normal top-level topic — pass chap_nk so the natural_key
+                    # format is globally unique: {chap_nk}_{slug}.
+                    # This matches json_to_db.py and avoids collisions when
+                    # multiple subjects/classes share the same chapter_num.
+                    topic_obj = _upsert_topic(
+                        db, chapter_id, chap_nk, topic_title, order,
+                        topic_number=topic_number,
+                    )
                     topic_obj.summary = topic_summary
                     topic_obj.content_type = content_type
                     topic_obj.difficulty_level = topic_data.get("difficulty_level")
@@ -681,7 +817,7 @@ class IngestionPipeline:
                     if content_type != "activity":
                         last_concept_topic = topic_obj
                     
-                # If it's an activity, insert into the new Activity table
+                # If it's an activity, insert into the new Activity table and skip content_block insertion
                 if content_type == "activity":
                     parent_topic_id = last_concept_topic.id if last_concept_topic else topic_obj.id
                     act = Activity(
@@ -693,50 +829,122 @@ class IngestionPipeline:
                         difficulty_level=topic_data.get("difficulty_level")
                     )
                     db.add(act)
+                    # Do NOT fall through to content_blocks — activities are stored separately
+                    continue
                 
                 for prereq in topic_prereqs:
                     _upsert_topic_prerequisite(db, topic_obj.id, prereq)
 
-                bc = 0
                 repaired_text = topic_data.get("repaired_text", "")
-                
-                # Split repaired_text into chunks of roughly SUB_CHUNK_SIZE
-                text_chunks = self._paragraph_chunks(repaired_text, SUB_CHUNK_SIZE)
-                
-                for blk_text in text_chunks:
-                    blk_text = blk_text.strip()
-                    if not blk_text: continue
-                    
-                    h = hashlib.md5(blk_text.lower().encode()).hexdigest()
-                    if h in seen: continue
-                    seen.add(h)
-                    
-                    try:
-                        # Embed the summary for the first block, else embed raw text if no summary exists
-                        if bc == 0 and topic_summary:
-                            vec = _embed(topic_summary)
-                        elif not topic_summary:
-                            vec = _embed(blk_text)
-                        else:
-                            vec = None
-                    except Exception as emb_exc:
-                        logger.warning(f"[Ingestion] Embedding failed for block bc={bc}: {emb_exc}.")
-                        vec = None
-                        
-                    _upsert_block(
-                        db, topic_obj.id, blk_text, bc,
-                        subtopic_id=subtopic_obj.id if subtopic_obj else None,
-                        block_type="text",
-                        page_num=None,
-                        ocr_confidence=None,
-                        summary=topic_summary if bc == 0 else "",
-                        keywords=topic_keywords if bc == 0 else None,
-                        prerequisites=topic_prereqs if bc == 0 else None,
-                        vec=vec,
+
+                # ── One ContentBlock per LLM section (no chunking) ───────────
+                # The LLM already produced a coherent, self-contained section.
+                # Chunking it into 800-char pieces would create blocks 1, 2, 3…
+                # that have NULL embeddings and are therefore INVISIBLE to RAG.
+                # We store the entire repaired_text as one block and embed the
+                # full summary (not truncated), so every section is retrievable.
+
+                if not repaired_text.strip():
+                    logger.warning(
+                        f"[Ingestion] Empty repaired_text for '{topic_title}' — skipped."
                     )
-                    bc += 1; total_blocks += 1
+                    skipped += 1
+                    continue
+
+                content_hash = hashlib.md5(repaired_text.strip().lower().encode()).hexdigest()
+                if content_hash in seen:
+                    logger.debug(f"[Ingestion] Duplicate section skipped: '{topic_title}'")
+                    continue
+                seen.add(content_hash)
+
+                # Embed the FULL summary string — no truncation, no sub-chunking.
+                # Fallback: if LLM returned an empty summary, embed repaired_text
+                # directly so the block is still retrievable in the degraded case.
+                embed_input = topic_summary.strip() if topic_summary.strip() else repaired_text
+                try:
+                    vec = _embed(embed_input)
+                except Exception as emb_exc:
+                    logger.warning(
+                        f"[Ingestion] Embedding failed for '{topic_title}': {emb_exc}. "
+                        "Block stored without vector — re-run ingest to fix."
+                    )
+                    vec = None
+
+                blk_row = _upsert_block(
+                    db, topic_obj.id,
+                    raw_text=repaired_text,       # full section text, never chunked
+                    block_index=order,            # unique per topic within chapter
+                    subtopic_id=subtopic_obj.id if subtopic_obj else None,
+                    block_type=content_type,      # propagate LLM content_type to DB
+                    page_num=None,
+                    ocr_confidence=None,
+                    summary=topic_summary,        # full LLM summary → enriched_summary
+                    keywords=topic_keywords,
+                    prerequisites=topic_prereqs,
+                    vec=vec,
+                )
+                total_blocks += 1
+
+                # Write raw OCR text to audit archive.
+                # NEVER used in live retrieval — audit/migration only.
+                # Write raw OCR blocks to audit archive.
+                # sec_key format must match the llm_output_data keys: "{idx}:{heading}"
+                sec_key_lookup = f"{order}:{paddlex_heading}"
+                if blk_row and not db.query(ContentRawArchive).filter(
+                    ContentRawArchive.block_id == blk_row.id
+                ).first():
+                    raw_ocr = "\n\n".join(
+                        llm_output_data.get(sec_key_lookup, {}).get("raw_blocks", [])
+                    )
+                    db.add(ContentRawArchive(
+                        block_id=blk_row.id,
+                        raw_text=raw_ocr,
+                        repaired_text=repaired_text,
+                    ))
+
+        # ── Chapter-level LLM summarization ─────────────────────────────────
+        # After all topics are stored, collect their summaries and make ONE LLM
+        # call to populate chapters.summary, learning_objectives, key_concepts.
+        # This is cheap: it only uses already-generated topic summaries (no PDF text).
+        try:
+            topic_summaries = [
+                ts for _, td in structured_topics
+                if (ts := td.get("summary", "").strip())
+            ]
+            if topic_summaries:
+                joined = "\n".join(f"- {s}" for s in topic_summaries)
+                chap_prompt = (
+                    f"You are summarising a textbook chapter titled '{chapter_title}'.\n"
+                    f"Below are summaries of each section in the chapter:\n{joined}\n\n"
+                    "Return ONLY valid JSON with these three keys:\n"
+                    '{"summary": "3-4 declarative sentences covering the whole chapter", '
+                    '"learning_objectives": ["objective 1", "objective 2", ...], '
+                    '"key_concepts": ["concept 1", "concept 2", ...]}'
+                )
+                chap_resp = self.llm.chat.completions.create(
+                    model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
+                    messages=[
+                        {"role": "system", "content": "You are a curriculum summariser. Output only JSON."},
+                        {"role": "user", "content": chap_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                )
+                chap_data = json.loads(chap_resp.choices[0].message.content)
+                with managed_session() as db:
+                    from app.data.models.content import Chapter as ChapterModel
+                    chap_row = db.query(ChapterModel).filter(ChapterModel.id == chapter_id).first()
+                    if chap_row:
+                        chap_row.summary             = chap_data.get("summary", "")
+                        chap_row.learning_objectives = json.dumps(chap_data.get("learning_objectives", []))
+                        chap_row.key_concepts        = json.dumps(chap_data.get("key_concepts", []))
+                        chap_row.prompt_version      = PROMPT_VERSION
+                logger.info(f"[Ingestion] Chapter summary written for chapter_id={chapter_id}")
+        except Exception as chap_exc:
+            logger.warning(f"[Ingestion] Chapter summarization failed (non-fatal): {chap_exc}")
 
         # Compute final confidence + status
+
         sec_conf     = 1.0 - skipped / max(len(sections), 1)
         ocr_norm     = avg_ocr / 100.0
         overall_conf = round(sec_conf * 0.6 + ocr_norm * 0.4, 3)
@@ -787,12 +995,32 @@ class IngestionPipeline:
 
     def _analyse_pages(self, pdf_path: str, page_count: int) -> list[PageAnalysis]:
         pipeline = _get_layout_pipeline()
-        reader   = PdfReader(pdf_path)
-        results  = []
-        for i, page in enumerate(reader.pages):
-            pn       = i + 1
-            raw_text = page.extract_text() or ""
-            scanned  = len(raw_text.strip()) < MIN_TEXT_PER_PAGE
+        pages_text: list[str] = []
+        if fitz is not None:
+            try:
+                doc = fitz.open(pdf_path)
+                pages_text = [page.get_text() or "" for page in doc]
+            except Exception as exc:
+                logger.warning(f"[Ingestion] PyMuPDF extract failed: {exc}, falling back to PyPDF2")
+                pages_text = []
+
+        if not pages_text:
+            try:
+                reader = PdfReader(pdf_path)
+                for page in reader.pages:
+                    try:
+                        pages_text.append(page.extract_text() or "")
+                    except Exception as exc:
+                        logger.warning(f"[Ingestion] PyPDF2 page extract failed ({exc}), treating as empty/scanned")
+                        pages_text.append("")
+            except Exception as exc:
+                logger.warning(f"[Ingestion] PyPDF2 failed: {exc}")
+                pages_text = [""] * page_count
+
+        results = []
+        for i, raw_text in enumerate(pages_text):
+            pn = i + 1
+            scanned = len(raw_text.strip()) < MIN_TEXT_PER_PAGE
             if scanned:
                 pa = self._analyse_scanned_page(pdf_path, pn, pipeline)
             else:
@@ -907,6 +1135,17 @@ class IngestionPipeline:
 
     @staticmethod
     def _page_to_image(pdf_path: str, page_number: int):
+        if fitz is not None:
+            try:
+                import io
+                from PIL import Image
+                doc = fitz.open(pdf_path)
+                page = doc[page_number - 1]
+                pix = page.get_pixmap(dpi=300)
+                return Image.open(io.BytesIO(pix.tobytes("png")))
+            except Exception as exc:
+                logger.debug(f"[Ingestion] PyMuPDF page_to_image p{page_number} failed: {exc}")
+
         try:
             from pdf2image import convert_from_path  # type: ignore
             imgs = convert_from_path(pdf_path, first_page=page_number, last_page=page_number, dpi=300)
@@ -1188,13 +1427,27 @@ class IngestionPipeline:
         size = os.path.getsize(pdf_path)
         if size > MAX_PDF_BYTES:
             raise ValueError(f"PDF too large: {size/1e6:.1f} MB (limit {MAX_PDF_BYTES//1_000_000} MB)")
-        try:
-            reader = PdfReader(pdf_path)
-        except Exception as exc:
-            raise ValueError(f"Corrupt PDF: {exc}") from exc
-        if reader.is_encrypted:
-            raise ValueError("PDF is encrypted / password-protected.")
-        pc = len(reader.pages)
+        pc = 0
+        if fitz is not None:
+            try:
+                doc = fitz.open(pdf_path)
+                if doc.is_encrypted:
+                    raise ValueError("PDF is encrypted / password-protected.")
+                pc = len(doc)
+            except Exception as exc:
+                if "encrypted" in str(exc).lower():
+                    raise
+                logger.warning(f"[Ingestion] PyMuPDF validation failed: {exc}")
+
+        if pc == 0:
+            try:
+                reader = PdfReader(pdf_path)
+            except Exception as exc:
+                raise ValueError(f"Corrupt PDF: {exc}") from exc
+            if reader.is_encrypted:
+                raise ValueError("PDF is encrypted / password-protected.")
+            pc = len(reader.pages)
+
         if pc == 0: raise ValueError("PDF has zero pages.")
         if pc > MAX_PDF_PAGES: warns.append(f"Large PDF: {pc} pages.")
         logger.info(f"[Ingestion] Validated: {pc} pages, {size/1024:.1f} KB")
@@ -1203,12 +1456,20 @@ class IngestionPipeline:
     @staticmethod
     def _inspect_metadata(pdf_path: str) -> tuple[str, dict]:
         meta: dict = {}
-        try:
-            reader = PdfReader(pdf_path)
-            if reader.metadata:
-                meta = {str(k): str(v) for k, v in reader.metadata.items()}
-        except Exception:
-            pass
+        if fitz is not None:
+            try:
+                doc = fitz.open(pdf_path)
+                if doc.metadata:
+                    meta = {str(k): str(v) for k, v in doc.metadata.items()}
+            except Exception:
+                pass
+        if not meta:
+            try:
+                reader = PdfReader(pdf_path)
+                if reader.metadata:
+                    meta = {str(k): str(v) for k, v in reader.metadata.items()}
+            except Exception:
+                pass
         return "application/pdf", meta
 
     @staticmethod

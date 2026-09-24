@@ -96,13 +96,14 @@ class RetrievalCache:
 
     # ── Layer 2: Scoped retrieval cache ───────────────────────────────────────
 
-    def _ret_key(self, query: str, class_num, subject: str) -> str:
+    def _ret_key(self, query: str, class_num, subject: str, board_id=None) -> str:
+        brd = str(board_id) if board_id is not None else "any"
         cls = str(class_num) if class_num is not None else "any"
         sub = (subject or "any").lower()
-        return f"ret:{cls}:{sub}:{self._normalize(query)}"
+        return f"ret:{brd}:{cls}:{sub}:{self._normalize(query)}"
 
-    def get_chunks(self, query: str, class_num, subject: str) -> list[dict] | None:
-        raw = self._safe_get(self._ret_key(query, class_num, subject))
+    def get_chunks(self, query: str, class_num, subject: str, board_id=None) -> list[dict] | None:
+        raw = self._safe_get(self._ret_key(query, class_num, subject, board_id))
         if raw:
             try:
                 return json.loads(raw)
@@ -111,12 +112,12 @@ class RetrievalCache:
         return None
 
     def set_chunks(
-        self, query: str, class_num, subject: str, chunks: list[dict]
+        self, query: str, class_num, subject: str, chunks: list[dict], board_id=None
     ) -> None:
         if not chunks:
             return
         self._safe_setex(
-            self._ret_key(query, class_num, subject),
+            self._ret_key(query, class_num, subject, board_id),
             settings.CACHE_CHUNK_TTL,
             json.dumps(chunks),
         )
@@ -145,17 +146,25 @@ class RetrievalCache:
         """Clears all retrieval cache keys for a class+subject after re-ingestion."""
         return self.invalidate_subject(class_num, subject)
 
-    def invalidate_subject(self, class_num, subject: str) -> int:
-        """Clears all retrieval cache keys for a class+subject after re-ingestion."""
+    def invalidate_subject(self, class_num, subject: str, board_id=None) -> int:
+        """Clears all retrieval cache keys for a board+class+subject after re-ingestion."""
         if not self._client:
             return 0
         try:
-            pattern = f"ret:{class_num}:{subject.lower()}:*"
-            keys = self._client.keys(pattern)
+            brd = str(board_id) if board_id is not None else "*"
+            pattern = f"ret:{brd}:{class_num}:{subject.lower()}:*"
+            # Use SCAN instead of KEYS — KEYS is blocked on Upstash (serverless Redis)
+            keys: list[str] = []
+            cursor = 0
+            while True:
+                cursor, partial = self._client.scan(cursor, match=pattern, count=100)
+                keys.extend(partial)
+                if cursor == 0:
+                    break
             if keys:
                 self._client.delete(*keys)
             logger.info(
-                f"Cache invalidated {len(keys)} keys for class={class_num}, subject={subject}"
+                f"Cache invalidated {len(keys)} keys for board={board_id}, class={class_num}, subject={subject}"
             )
             return len(keys)
         except Exception as exc:
@@ -183,3 +192,111 @@ class RetrievalCache:
             self._INGEST_STRUCT_TTL,
             json.dumps(data),
         )
+
+    # ── Layer 5: Session State Cache ───────────────────────────────────────────
+    # Caches per-student, per-subject data that changes only every BATCH_TURN_INTERVAL turns:
+    #   - cognitive metrics (10 scores)       key: sess:metrics:{user_id}:{subject_id}
+    #   - learning preferences                key: sess:prefs:{user_id}
+    #   - student memory items                key: sess:memory:{user_id}:{subject_id}
+    #   - weak topics list                    key: sess:weak:{user_id}:{subject_id}
+    #
+    # TTL is short (30 min session window). On batch update (every 4 turns),
+    # the orchestrator calls invalidate_session_state() to force a fresh DB read.
+    #
+    # All methods are fail-safe — a Redis miss just means we read from DB.
+
+    _SESSION_TTL = 60 * 30  # 30 minutes
+
+    def get_session_metrics(self, user_id: str, subject_id: int) -> dict | None:
+        raw = self._safe_get(f"sess:metrics:{user_id}:{subject_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_session_metrics(self, user_id: str, subject_id: int, metrics: dict) -> None:
+        self._safe_setex(
+            f"sess:metrics:{user_id}:{subject_id}",
+            self._SESSION_TTL,
+            json.dumps(metrics),
+        )
+
+    def get_session_prefs(self, user_id: str) -> dict | None:
+        raw = self._safe_get(f"sess:prefs:{user_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_session_prefs(self, user_id: str, prefs: dict) -> None:
+        self._safe_setex(
+            f"sess:prefs:{user_id}",
+            self._SESSION_TTL,
+            json.dumps(prefs),
+        )
+
+    def get_session_memory(self, user_id: str, subject_id: int) -> list | None:
+        raw = self._safe_get(f"sess:memory:{user_id}:{subject_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_session_memory(self, user_id: str, subject_id: int, items: list) -> None:
+        self._safe_setex(
+            f"sess:memory:{user_id}:{subject_id}",
+            self._SESSION_TTL,
+            json.dumps(items),
+        )
+
+    def get_session_weak_topics(self, user_id: str, subject_id: int) -> list | None:
+        raw = self._safe_get(f"sess:weak:{user_id}:{subject_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_session_weak_topics(self, user_id: str, subject_id: int, topics: list) -> None:
+        self._safe_setex(
+            f"sess:weak:{user_id}:{subject_id}",
+            self._SESSION_TTL,
+            json.dumps(topics),
+        )
+
+    def invalidate_session_state(self, user_id: str, subject_id: int) -> None:
+        """
+        Called after every batch update (every 4 turns) to force a fresh DB read
+        on the next turn. Also call after quiz completion or profile preset change.
+        """
+        keys = [
+            f"sess:metrics:{user_id}:{subject_id}",
+            f"sess:prefs:{user_id}",
+            f"sess:memory:{user_id}:{subject_id}",
+            f"sess:weak:{user_id}:{subject_id}",
+        ]
+        if not self._client:
+            return
+        try:
+            self._client.delete(*keys)
+            logger.debug(f"Session state cache invalidated for user={user_id} subject={subject_id}")
+        except Exception as exc:
+            logger.debug(f"Session cache invalidation error: {exc}")
+
+
+_retrieval_cache_instance: RetrievalCache | None = None
+
+
+def get_redis_cache() -> RetrievalCache:
+    """Returns the singleton RetrievalCache instance."""
+    global _retrieval_cache_instance
+    if _retrieval_cache_instance is None:
+        _retrieval_cache_instance = RetrievalCache()
+    return _retrieval_cache_instance

@@ -73,22 +73,29 @@ def update_student_memory(
         logger.warning(f"Memory merge failed: {exc}")
         new_memory = existing
 
+    # Safety guard: never delete existing memory if the LLM returned nothing valid.
+    # Deleting before re-inserting would wipe all student memory on LLM failure.
+    if not isinstance(new_memory, list) or not new_memory:
+        logger.warning(
+            "[Memory] LLM returned empty or invalid memory list — preserving existing items."
+        )
+        return
+
     with managed_session() as db:
         # Delete old active memories for this subject/user to replace them
         db.query(StudentMemoryItem).filter(
             StudentMemoryItem.user_id == student_id,
             StudentMemoryItem.subject_id == subject_id,
         ).delete()
-        
+
         # Insert new updated facts
-        if isinstance(new_memory, list):
-            for fact in new_memory:
-                if isinstance(fact, str) and fact.strip():
-                    db.add(StudentMemoryItem(
-                        user_id=student_id,
-                        subject_id=subject_id,
-                        fact=fact.strip(),
-                    ))
+        for fact in new_memory:
+            if isinstance(fact, str) and fact.strip():
+                db.add(StudentMemoryItem(
+                    user_id=student_id,
+                    subject_id=subject_id,
+                    fact=fact.strip(),
+                ))
 
 def get_student_tasks(student_id: str, subject_id: int | None = None) -> list[str]:
     with managed_session() as db:

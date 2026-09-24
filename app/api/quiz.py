@@ -72,23 +72,48 @@ def generate_quiz_endpoint(
     Generates a personalised quiz (MCQ + theory) for the authenticated student.
     Adapts difficulty from their cognitive profile and memory.
     """
+    student_id = str(student.id)
+    class_num = getattr(student, "class_num", 10) or 10
+
     try:
         with managed_session() as db:
-            sub = db.query(Subject).filter(Subject.name == request.subject).first()
-            subject_id = sub.id if sub else 0
-            
-            metrics = get_subject_metrics(db, student.id, subject_id)
+            sub = None
+            req_sub = (request.subject or "").strip()
+            # 1. Try if request.subject is an integer ID (e.g. "1")
+            if req_sub.isdigit():
+                sid_candidate = int(req_sub)
+                if sid_candidate > 0:
+                    sub = db.query(Subject).filter(Subject.id == sid_candidate).first()
+            # 2. Try by case-insensitive name
+            if not sub and req_sub:
+                sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == req_sub.lower()).first()
+            # 3. Fallback to conversation subject if session_id is provided
+            if not sub and request.session_id:
+                from app.data.models.chat import Conversation
+                conv = db.query(Conversation).filter(Conversation.id == request.session_id).first()
+                if conv and conv.subject_id:
+                    sub = db.query(Subject).filter(Subject.id == conv.subject_id).first()
+            # 4. Fallback to first available subject in DB
+            if not sub:
+                sub = db.query(Subject).first()
 
-        memory_items = get_student_memory(student.id, str(subject_id))
+            if not sub:
+                raise HTTPException(status_code=400, detail="No subjects found in curriculum database.")
+
+            subject_id = sub.id
+            subject_name = sub.name
+            metrics = get_subject_metrics(db, student_id, subject_id)
+
+        memory_items = get_student_memory(student_id, str(subject_id))
         memory_str = "\n".join(f"- {m}" for m in memory_items) if memory_items else "(no memory yet)"
 
-        existing_fb = get_subject_quiz_feedback(student.id, subject_id)
+        existing_fb = get_subject_quiz_feedback(student_id, subject_id)
         weak_topics = existing_fb.get("weak_topics", []) if existing_fb else []
 
         questions = generate_quiz(
-            subject=request.subject,
+            subject=subject_name,
             topic=request.topic,
-            class_num=student.class_num,
+            class_num=class_num,
             student_memory=memory_str,
             cognitive_metrics=metrics,
             weak_topics=weak_topics,
@@ -99,7 +124,7 @@ def generate_quiz_endpoint(
             raise HTTPException(status_code=500, detail="Quiz generation returned no questions.")
 
         attempt_id = create_quiz_attempt(
-            student_id=student.id,
+            student_id=student_id,
             subject_id=subject_id,
             topic=request.topic,
             source=request.source,
@@ -111,7 +136,7 @@ def generate_quiz_endpoint(
 
         return GenerateQuizResponse(
             attempt_id=attempt_id,
-            subject=request.subject,
+            subject=subject_name,
             topic=request.topic,
             source=request.source,
             questions=[
@@ -170,6 +195,9 @@ def finish_quiz_endpoint(
     4. Applies cognitive metric impact to student profile + memory
     5. Updates topic mastery + spaced repetition schedule
     """
+    student_id = str(student.id)
+    student_class_num = getattr(student, "class_num", 10) or 10
+
     try:
         # 1. Score the attempt
         result    = finish_quiz_attempt(request.attempt_id)
@@ -206,7 +234,7 @@ def finish_quiz_endpoint(
         ai_feedback = generate_quiz_ai_feedback(
             subject=subject_name,
             topic=topic,
-            class_num=student.class_num,
+            class_num=student_class_num,
             score=score,
             correct=correct,
             total=total,
@@ -259,7 +287,7 @@ def finish_quiz_endpoint(
                     sqlfunc.lower(Topic.title) == topic.lower()
                 ).first()
                 if topic_row:
-                    update_topic_mastery_from_quiz(student_id, topic_row.id, score, passed)
+                    update_topic_mastery_from_quiz(user_id, topic_row.id, score, passed)
         except Exception as e:
             logger.warning(f"Topic mastery update after quiz failed: {e}")
 
@@ -270,6 +298,13 @@ def finish_quiz_endpoint(
             update_student_streak(user_id)
         except Exception as e:
             logger.warning(f"Quiz count/streak update failed: {e}")
+
+        # 9. Invalidate session cache so subsequent chat turns pull fresh weak topics & mastery
+        try:
+            from app.infra.redis_cache import get_redis_cache
+            get_redis_cache().invalidate_session_state(user_id, subject_id)
+        except Exception as e:
+            logger.warning(f"Session cache invalidation after quiz failed: {e}")
 
         return FinishQuizResponse(
             attempt_id=request.attempt_id,

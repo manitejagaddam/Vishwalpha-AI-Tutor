@@ -114,11 +114,66 @@ export const chatApi = {
     const res = await client.get(`/history/${sessionId}`);
     return res.data;
   },
+
+  activateBranch: async (sessionId, messageId) => {
+    const res = await client.patch(`/conversations/${sessionId}/messages/${messageId}/activate`);
+    return res.data;
+  },
+
+  sendFeedback: async (messageId, rating, feedbackText = null) => {
+    const res = await client.post('/chat/feedback', {
+      message_id: messageId,
+      rating,
+      feedback_text: feedbackText
+    });
+    return res.data;
+  },
+};
+
+export const spacesApi = {
+  getSpaces: async (subject = null) => {
+    const params = {};
+    if (subject) params.subject = subject;
+    const res = await client.get('/spaces', { params });
+    return res.data.spaces;
+  },
+  createSpace: async (data) => {
+    const res = await client.post('/spaces', data);
+    return res.data;
+  },
+  updateSpace: async (spaceId, data) => {
+    const res = await client.patch(`/spaces/${spaceId}`, data);
+    return res.data;
+  },
+  deleteSpace: async (spaceId) => {
+    const res = await client.delete(`/spaces/${spaceId}`);
+    return res.data;
+  },
+};
+
+export const searchApi = {
+  searchConversations: async (q, limit = 20) => {
+    const res = await client.get('/conversations/search', { params: { q, limit } });
+    return res.data.results;
+  },
+};
+
+export const shareApi = {
+  createShareLink: async (sessionId) => {
+    const res = await client.post(`/conversations/${sessionId}/share`);
+    return res.data;
+  },
+  getSharedConversation: async (token) => {
+    const res = await client.get(`/share/${token}`);
+    return res.data;
+  },
 };
 
 export const studentApi = {
-  getSessions: async (subject = "Science") => {
-    const res = await client.get('/sessions', { params: { subject } });
+  getSessions: async (subject = "Science", studySpaceId = null) => {
+    const params = { subject };
+    if (studySpaceId) params.study_space_id = studySpaceId;
+    const res = await client.get('/sessions', { params });
     return res.data.sessions;
   },
   getMemory: async (subject = "Science") => {

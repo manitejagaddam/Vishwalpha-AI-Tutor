@@ -51,7 +51,6 @@ export default function ChatPage() {
               <div className="h-8 w-1 rounded-full bg-white/20 group-hover:bg-indigo-300 transition-colors" />
             </PanelResizeHandle>
             <Panel defaultSize={30} minSize={20} maxSize={500}>
-              <button>  </button>
               <ContextPanel />
             </Panel>
           </>

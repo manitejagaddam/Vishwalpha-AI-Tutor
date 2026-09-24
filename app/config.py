@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # ── Retrieval ────────────────────────────────────────────────────────
     RETRIEVAL_CONFIDENCE_THRESHOLD: float = 0.60
 
+    # ── Orchestration & Sync ─────────────────────────────────────────────
+    COGNITIVE_BATCH_SIZE: int = 4
+    SESSION_SYNC_THRESHOLD_MINUTES: int = 30
+
     # ── Rate Limiting ────────────────────────────────────────────────────
     RATE_LIMIT_CHAT: str = "30/minute"
     RATE_LIMIT_READ: str = "120/minute"
@@ -54,7 +58,7 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10_080  # 7 days
 
     # ── CORS ─────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://localhost:8000"
 
     # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────────
     TF_ENABLE_ONEDNN_OPTS: str = "0"

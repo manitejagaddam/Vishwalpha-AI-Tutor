@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { studentApi, chatApi } from '../api/client';
+import { studentApi, chatApi, spacesApi } from '../api/client';
 
 const SessionContext = createContext();
 
@@ -11,6 +11,12 @@ export const SessionProvider = ({ children }) => {
   const [tutorMode, setTutorMode] = useState('standard');
   const [showContext, setShowContext] = useState(true);
   
+  // Addon states
+  const [studySpaces, setStudySpaces] = useState([]);
+  const [activeSpaceId, setActiveSpaceId] = useState(null); // null means "All Chats"
+  const [isIncognito, setIsIncognito] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  
   const [messages, setMessages] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [memory, setMemory] = useState('');
@@ -19,6 +25,8 @@ export const SessionProvider = ({ children }) => {
   const [sessionRemark, setSessionRemark] = useState('');
   
   const [metricsAdjustments, setMetricsAdjustments] = useState(null);
+
+  const activeSpace = studySpaces.find(s => s.id === activeSpaceId) || null;
 
   const refreshProfile = useCallback(async () => {
     if (!student) return;
@@ -31,15 +39,25 @@ export const SessionProvider = ({ children }) => {
     }
   }, [student, subject]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSpaces = useCallback(async () => {
     if (!student) return;
     try {
-      const sess = await studentApi.getSessions(subject);
-      setSessions(sess);
+      const spaces = await spacesApi.getSpaces(subject);
+      setStudySpaces(spaces || []);
     } catch (e) {
       console.error(e);
     }
   }, [student, subject]);
+
+  const refreshSessions = useCallback(async () => {
+    if (!student) return;
+    try {
+      const sess = await studentApi.getSessions(subject, activeSpaceId);
+      setSessions(sess);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [student, subject, activeSpaceId]);
 
   const refreshMemory = useCallback(async () => {
     if (!student) return;
@@ -58,6 +76,12 @@ export const SessionProvider = ({ children }) => {
       if (sid) {
         const hist = await chatApi.getHistory(sid);
         setMessages(hist.recent_messages || []);
+        if (hist.metrics && Object.keys(hist.metrics).length > 0) {
+          setMetrics(hist.metrics);
+        }
+        if (hist.cognitive_skills && Object.keys(hist.cognitive_skills).length > 0) {
+          setCognitiveSkills(hist.cognitive_skills);
+        }
         
         const remark = await studentApi.getSessionRemark(sid);
         setSessionRemark(remark);
@@ -70,13 +94,25 @@ export const SessionProvider = ({ children }) => {
     }
   }, []);
 
+  const activateBranch = useCallback(async (messageId) => {
+    if (!sessionId || !messageId) return;
+    try {
+      await chatApi.activateBranch(sessionId, messageId);
+      // Reload session history to pick up the updated active branch path
+      await loadSession(sessionId);
+    } catch (e) {
+      console.error('Failed to activate branch:', e);
+    }
+  }, [sessionId, loadSession]);
+
   useEffect(() => {
     if (student) {
       refreshProfile();
       refreshSessions();
+      refreshSpaces();
       refreshMemory();
     }
-  }, [student, refreshProfile, refreshSessions, refreshMemory]);
+  }, [student, refreshProfile, refreshSessions, refreshSpaces, refreshMemory]);
 
   return (
     <SessionContext.Provider value={{
@@ -86,6 +122,12 @@ export const SessionProvider = ({ children }) => {
       showContext, setShowContext,
       messages, setMessages,
       sessions, refreshSessions,
+      studySpaces, setStudySpaces,
+      activeSpaceId, setActiveSpaceId,
+      activeSpace, refreshSpaces,
+      isIncognito, setIsIncognito,
+      searchQuery, setSearchQuery,
+      activateBranch,
       memory, refreshMemory,
       metrics, setMetrics,
       cognitiveSkills, setCognitiveSkills,

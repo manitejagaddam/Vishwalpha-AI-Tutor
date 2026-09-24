@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
-import { LogOut, BrainCircuit, Activity, Clock, Zap, BookOpen } from 'lucide-react';
+import { searchApi } from '../../api/client';
+import { LogOut, BrainCircuit, Activity, Clock, Zap, BookOpen, Folder, Plus, Search, X } from 'lucide-react';
+import StudySpaceModal from './StudySpaceModal';
 
 /** Returns a human-readable session title from DB metadata */
 function sessionTitle(s) {
@@ -25,8 +27,41 @@ export default function Sidebar({ onStartQuiz }) {
     subject, setSubject, 
     tutorMode, setTutorMode,
     sessions, loadSession, sessionId,
+    studySpaces, activeSpaceId, setActiveSpaceId, activeSpace,
     memory, sessionRemark
   } = useSession();
+
+  const [showSpaceModal, setShowSpaceModal] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+
+  // Search effect
+  useEffect(() => {
+    if (!searchTerm.trim()) {
+      setSearchResults(null);
+      setIsSearching(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const res = await searchApi.searchConversations(searchTerm.trim());
+        setSearchResults(res || []);
+      } catch (err) {
+        console.error('Search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
+  const displayedSessions = searchResults !== null 
+    ? searchResults 
+    : sessions;
 
   return (
     <div className="glass-panel flex flex-col h-full overflow-y-auto">
@@ -50,8 +85,45 @@ export default function Sidebar({ onStartQuiz }) {
         </div>
       </div>
 
-      <div className="p-5 space-y-8 flex-1">
+      <div className="p-5 space-y-7 flex-1">
         
+        {/* Study Space Switcher */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest flex items-center gap-1.5">
+              <Folder size={12} className="text-violet-400" /> Study Space
+            </label>
+            <button
+              onClick={() => setShowSpaceModal(true)}
+              className="text-[11px] font-bold text-violet-300 hover:text-white flex items-center gap-1 hover:bg-violet-500/20 px-2 py-0.5 rounded-lg border border-violet-500/30 transition-all"
+            >
+              <Plus size={11} /> New Space
+            </button>
+          </div>
+
+          <select
+            value={activeSpaceId || ''}
+            onChange={(e) => setActiveSpaceId(e.target.value ? e.target.value : null)}
+            className="w-full bg-black/40 border border-white/10 rounded-xl p-2.5 text-xs font-semibold text-violet-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 appearance-none transition-all shadow-inner hover:bg-black/60"
+          >
+            <option value="">📂 All Workspaces</option>
+            {studySpaces.map(sp => (
+              <option key={sp.id} value={sp.id}>
+                🎯 {sp.title}
+              </option>
+            ))}
+          </select>
+
+          {activeSpace && activeSpace.custom_instructions && (
+            <div className="p-2.5 rounded-xl bg-violet-950/30 border border-violet-500/20 text-[11px] text-violet-300 leading-snug">
+              <span className="font-bold text-violet-200">Custom focus: </span>
+              {activeSpace.custom_instructions.length > 80
+                ? activeSpace.custom_instructions.slice(0, 80) + '...'
+                : activeSpace.custom_instructions}
+            </div>
+          )}
+        </div>
+
         {/* Controls */}
         <div className="space-y-4">
           <div className="group">
@@ -91,9 +163,9 @@ export default function Sidebar({ onStartQuiz }) {
           </button>
         </div>
 
-        {/* Sessions */}
+        {/* Sessions & Search */}
         <div>
-          <div className="flex justify-between items-center mb-3">
+          <div className="flex justify-between items-center mb-2.5">
             <label className="text-[10px] text-gray-400 uppercase font-extrabold tracking-widest flex items-center gap-1.5">
               <Clock size={12} className="text-blue-400" /> Past Sessions
             </label>
@@ -101,8 +173,29 @@ export default function Sidebar({ onStartQuiz }) {
               + New
             </button>
           </div>
+
+          {/* Search Bar */}
+          <div className="relative mb-3">
+            <Search size={13} className="absolute left-3 top-3 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Search chats or topics..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-black/40 border border-white/10 rounded-xl pl-8 pr-7 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                className="absolute right-2.5 top-2.5 text-gray-400 hover:text-white"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
           <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-            {sessions.map(s => (
+            {displayedSessions.map(s => (
               <button
                 key={s.id}
                 onClick={() => loadSession(s.id)}
@@ -114,6 +207,14 @@ export default function Sidebar({ onStartQuiz }) {
               >
                 {/* Smart title: topic name if available, else friendly date */}
                 <span className="font-medium truncate leading-tight">{sessionTitle(s)}</span>
+                
+                {/* Match snippet if from search */}
+                {s.match_snippet && s.match_type === 'message' && (
+                  <span className="text-[11px] text-indigo-300/80 truncate italic">
+                    "{s.match_snippet}"
+                  </span>
+                )}
+
                 {/* Subtitle: date + message count */}
                 <span className="text-[10px] opacity-50 flex items-center gap-1.5">
                   <Clock size={9} />
@@ -122,9 +223,18 @@ export default function Sidebar({ onStartQuiz }) {
                 </span>
               </button>
             ))}
-            {sessions.length === 0 && <div className="text-xs text-gray-500 italic p-2 bg-black/20 rounded-lg text-center">No past sessions</div>}
+            {displayedSessions.length === 0 && (
+              <div className="text-xs text-gray-500 italic p-3 bg-black/20 rounded-lg text-center">
+                {searchTerm ? 'No matching conversations' : 'No past sessions'}
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Study Space Modal */}
+        {showSpaceModal && (
+          <StudySpaceModal onClose={() => setShowSpaceModal(false)} />
+        )}
 
         {/* Remarks */}
         {sessionRemark && (

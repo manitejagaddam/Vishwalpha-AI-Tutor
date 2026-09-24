@@ -4,6 +4,7 @@ import { useAuth } from './context/AuthContext';
 import AuthPage from './pages/AuthPage';
 import ChatPage from './pages/ChatPage';
 import AdminPage from './pages/AdminPage';
+import SharePage from './pages/SharePage';
 
 function App() {
   const { student } = useAuth();
@@ -13,6 +14,7 @@ function App() {
       <Routes>
         <Route path="/" element={!student ? <AuthPage /> : <ChatPage />} />
         <Route path="/admin" element={<AdminPage />} />
+        <Route path="/share/:token" element={<SharePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Router>

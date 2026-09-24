@@ -19,11 +19,15 @@ def get_or_create_conversation(
     user_id: uuid.UUID,
     conversation_id: Optional[uuid.UUID] = None,
     subject_id: Optional[int] = None,
+    study_space_id: Optional[uuid.UUID] = None,
 ) -> Conversation:
     """Returns an existing conversation or creates a new one."""
     if conversation_id:
         conv = get_conversation(db, conversation_id)
         if conv and conv.user_id == user_id:
+            if study_space_id and not conv.study_space_id:
+                conv.study_space_id = study_space_id
+                db.flush()
             return conv
 
     # Create new
@@ -31,6 +35,7 @@ def get_or_create_conversation(
         id=conversation_id or uuid.uuid4(),
         user_id=user_id,
         subject_id=subject_id,
+        study_space_id=study_space_id,
         is_pinned=False,
         is_archived=False,
         is_deleted=False,
@@ -53,6 +58,7 @@ def save_message(
     bloom_level: Optional[str] = None,
     contains_question: Optional[bool] = None,
     topic_id: Optional[int] = None,
+    metadata: Optional[dict] = None,
 ) -> Message:
     """
     Saves a message node in the tree with a single text content block.
@@ -86,7 +92,8 @@ def save_message(
         message_id=msg.id,
         block_type=block_type,
         content=content,
-        block_index=0
+        block_index=0,
+        extra_data=metadata or {}
     )
     db.add(block)
     
@@ -108,12 +115,13 @@ def get_message_history(
     """
     Walks up the message tree from leaf_message_id to root.
     Returns a list of dicts: {"role": str, "content": str} ordered chronologically.
+    Falls back to active_message_id or chronological messages if leaf is not provided or tree disconnected.
     """
-    if not leaf_message_id:
-        return []
-
     # Load all messages and blocks for this conversation into memory (usually small)
     messages = db.query(Message).filter(Message.conversation_id == conversation_id).all()
+    if not messages:
+        return []
+
     blocks = db.query(MessageContentBlock).filter(
         MessageContentBlock.message_id.in_([m.id for m in messages])
     ).all()
@@ -126,13 +134,17 @@ def get_message_history(
     for m_id in block_dict:
         block_dict[m_id].sort(key=lambda x: x.block_index)
 
-    # Walk up the tree
+    if not leaf_message_id:
+        conv = get_conversation(db, conversation_id)
+        if conv and conv.active_message_id:
+            leaf_message_id = conv.active_message_id
+
+    # Walk up the tree if we have a leaf
     path = []
     current_id = leaf_message_id
     while current_id and current_id in msg_dict:
         m = msg_dict[current_id]
         m_blocks = block_dict.get(m.id, [])
-        # Combine text blocks
         content = "\n\n".join([b.content for b in m_blocks if b.content])
         path.append({
             "role": m.role,
@@ -144,11 +156,67 @@ def get_message_history(
         if len(path) >= limit:
             break
 
-    # Reverse to chronological order (oldest first)
-    path.reverse()
-    return path
+    # If tree walk found messages, reverse to chronological order (oldest first)
+    if path:
+        path.reverse()
+        return path
+
+    # Fallback for disconnected / unlinked messages: sort by created_at
+    from datetime import datetime
+    sorted_msgs = sorted(messages, key=lambda x: x.created_at or datetime.min)
+    fallback_path = []
+    for m in sorted_msgs[-limit:]:
+        m_blocks = block_dict.get(m.id, [])
+        content = "\n\n".join([b.content for b in m_blocks if b.content])
+        fallback_path.append({
+            "role": m.role,
+            "content": content,
+            "id": m.id
+        })
+    return fallback_path
 
 def update_conversation_title(db: Session, conversation_id: uuid.UUID, title: str):
     """Updates the generated title for a conversation."""
     db.query(Conversation).filter(Conversation.id == conversation_id).update({"title": title})
     db.flush()
+
+def activate_message_branch(db: Session, conversation_id: uuid.UUID, message_id: uuid.UUID) -> Optional[Message]:
+    """
+    Activates the branch containing message_id.
+    Deactivates sibling messages and ensures child branches lead to a leaf.
+    Updates conversation.active_message_id.
+    """
+    target = db.query(Message).filter(Message.id == message_id, Message.conversation_id == conversation_id).first()
+    if not target:
+        return None
+
+    # 1. Activate target and deactivate siblings
+    siblings = db.query(Message).filter(
+        Message.conversation_id == conversation_id,
+        Message.parent_message_id == target.parent_message_id,
+        Message.role == target.role,
+    ).all()
+    for s in siblings:
+        s.is_active_branch = (s.id == target.id)
+
+    # 2. Walk down children ensuring one active path to leaf
+    curr = target
+    while True:
+        children = db.query(Message).filter(
+            Message.conversation_id == conversation_id,
+            Message.parent_message_id == curr.id,
+        ).order_by(Message.created_at.desc()).all()
+        if not children:
+            break
+        active_child = next((c for c in children if c.is_active_branch), children[0])
+        for c in children:
+            c.is_active_branch = (c.id == active_child.id)
+        curr = active_child
+
+    # 3. Update conversation's active_message_id
+    conv = get_conversation(db, conversation_id)
+    if conv:
+        conv.active_message_id = curr.id
+
+    db.flush()
+    return target

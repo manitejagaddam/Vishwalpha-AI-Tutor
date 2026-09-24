@@ -220,13 +220,26 @@ class TutorLLM:
 
         system_template = ab_template if ab_template else system_map.get(mode, _OPEN_CURRICULUM_PROMPT)
         
-        system_content = system_template.format(
-            context=context or "(no additional context)",
-            student_memory=student_memory or "(no memory yet)",
-            teaching_style=teaching_style,
-            weak_topics_section=weak_section,
-            review_section=review_section,
-        )
+        try:
+            system_content = system_template.format(
+                context=context or "(no additional context)",
+                student_memory=student_memory or "(no memory yet)",
+                teaching_style=teaching_style,
+                weak_topics_section=weak_section,
+                review_section=review_section,
+            )
+        except KeyError as ke:
+            logger.warning(
+                f"[TutorLLM] A/B prompt template missing placeholder {ke} — falling back to default."
+            )
+            fallback_template = system_map.get(mode, _OPEN_CURRICULUM_PROMPT)
+            system_content = fallback_template.format(
+                context=context or "(no additional context)",
+                student_memory=student_memory or "(no memory yet)",
+                teaching_style=teaching_style,
+                weak_topics_section=weak_section,
+                review_section=review_section,
+            )
 
         # Temperature and token config per mode
         if mode == "curriculum":

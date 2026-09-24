@@ -6,6 +6,8 @@ from app.schemas.legacy import SourceInfo, QuizSuggestion, YesterdayContext
 class ChatRequest(BaseModel):
     conversation_id: Optional[UUID] = Field(None, alias="session_id")
     parent_message_id: Optional[UUID] = None
+    study_space_id: Optional[UUID] = None
+    incognito: bool = False
     question: str = Field(..., min_length=1, max_length=4000)
     subject_id: Optional[int] = None
     subject: Optional[str] = None  # Frontend sends string "Science"
@@ -37,3 +39,6 @@ class ChatResponse(BaseModel):
     quiz_suggestion: Optional[QuizSuggestion] = None
     yesterday_context: Optional[YesterdayContext] = None
     is_new_conversation: bool = False
+    context: str = ""
+    chunks: List[Dict[str, Any]] = []
+    prompt_messages: List[Dict[str, Any]] = []

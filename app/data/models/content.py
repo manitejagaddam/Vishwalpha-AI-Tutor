@@ -247,6 +247,33 @@ class ContentBlock(Base):
     subtopic = relationship("Subtopic", back_populates="blocks")
     embeddings = relationship("BlockEmbedding", back_populates="block", cascade="all, delete-orphan")
     sources    = relationship("MessageSource", back_populates="block")
+    raw_archive = relationship("ContentRawArchive", back_populates="block", uselist=False, cascade="all, delete-orphan")
+
+
+class ContentRawArchive(Base):
+    """
+    Verbatim audit store for raw OCR text and LLM-repaired text.
+
+    WHY THIS EXISTS:
+    - content_blocks.raw_text is used for retrieval context (summarised version).
+    - This table holds the full original text for:
+        1. Re-ingestion / migration to a new pipeline without re-running PaddleX/OCR.
+        2. Auditing AI answers against the source textbook.
+        3. Re-embedding with a new model using the original repaired text.
+    - NEVER used in live retrieval or prompts — audit/migration only.
+    """
+    __tablename__ = "content_raw_archive"
+    __table_args__ = (
+        Index("idx_raw_archive_block_id", "block_id"),
+    )
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    block_id      = Column(Integer, ForeignKey("content_blocks.id", ondelete="CASCADE"), nullable=False, unique=True)
+    raw_text      = Column(Text, nullable=True)   # verbatim OCR extraction — never paraphrased
+    repaired_text = Column(Text, nullable=True)   # LLM-repaired full text from STRUCTURE_PROMPT
+    created_at    = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    block = relationship("ContentBlock", back_populates="raw_archive")
 
 
 class BlockEmbedding(Base):

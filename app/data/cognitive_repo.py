@@ -115,6 +115,14 @@ def _clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
 def _get_or_create_profile(
     db: Session, user_id: str, subject_id: int
 ) -> StudentSubjectProfile:
+    # Ensure subject_id is valid to prevent foreign key constraint violations
+    if not subject_id or subject_id <= 0:
+        first_sub = db.query(Subject).first()
+        if first_sub:
+            subject_id = first_sub.id
+        else:
+            logger.warning("[CognitiveRepo] No subjects found in DB when creating student profile.")
+
     profile = db.query(StudentSubjectProfile).filter(
         StudentSubjectProfile.user_id == user_id,
         StudentSubjectProfile.subject_id == subject_id,
@@ -251,6 +259,71 @@ def increment_chat_turns(user_id: str, subject_id: int) -> None:
     with managed_session() as db:
         profile = _get_or_create_profile(db, user_id, subject_id)
         profile.total_chat_turns = (profile.total_chat_turns or 0) + 1
+
+
+def batch_increment_chat_counters(user_id: str, subject_id: int) -> dict:
+    """
+    Coalesces increment_chat_turns, increment_streak_questions, and update_student_streak
+    into a single DB session/transaction, saving 2 round-trip DB calls per chat turn.
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    with managed_session() as db:
+        # 1. Subject profile chat turn increment
+        profile = _get_or_create_profile(db, user_id, subject_id)
+        profile.total_chat_turns = (profile.total_chat_turns or 0) + 1
+
+        # 2. Student streak & question counter
+        streak = db.query(StudentStreak).filter(
+            StudentStreak.user_id == user_id,
+        ).first()
+
+        if not streak:
+            streak = StudentStreak(
+                user_id=user_id,
+                current_streak_days=1,
+                longest_streak_days=1,
+                last_active_date=today,
+                total_active_days=1,
+                total_sessions=1,
+                total_questions_asked=1,
+            )
+            db.add(streak)
+            streak_info = {
+                "current_streak": 1,
+                "longest_streak": 1,
+                "total_active_days": 1,
+            }
+        else:
+            streak.total_questions_asked = (streak.total_questions_asked or 0) + 1
+            if streak.last_active_date == today:
+                streak.total_sessions = (streak.total_sessions or 0) + 1
+            else:
+                if streak.last_active_date == yesterday:
+                    streak.current_streak_days = (streak.current_streak_days or 0) + 1
+                else:
+                    streak.current_streak_days = 1
+
+                streak.longest_streak_days = max(
+                    streak.longest_streak_days or 0, streak.current_streak_days
+                )
+                streak.last_active_date = today
+                streak.total_active_days = (streak.total_active_days or 0) + 1
+                streak.total_sessions = (streak.total_sessions or 0) + 1
+
+            streak_info = {
+                "current_streak": streak.current_streak_days,
+                "longest_streak": streak.longest_streak_days,
+                "total_active_days": streak.total_active_days,
+            }
+
+        # 3. User last_active_at
+        student = db.query(User).filter(User.id == user_id).first()
+        if student:
+            student.last_active_at = datetime.now(timezone.utc)
+
+        return streak_info
 
 
 def increment_quiz_count(user_id: str, subject_id: int) -> None:

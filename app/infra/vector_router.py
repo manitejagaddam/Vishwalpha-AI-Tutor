@@ -13,17 +13,9 @@ from app.config import settings
 from app.infra.azure_openai_client import get_openai
 from app.data.database import managed_session
 from app.data.models.content import ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass
+from app.services.retrieval_service import embed_text  # shared, avoid duplication
 
 logger = logging.getLogger(__name__)
-
-
-def embed_text(text: str) -> list[float]:
-    client = get_openai()
-    response = client.embeddings.create(
-        input=text,
-        model=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-    )
-    return response.data[0].embedding
 
 
 class VectorRouter:
@@ -45,7 +37,12 @@ class VectorRouter:
 
         Pre-filters by board_id, class_num and subject_id BEFORE cosine sort.
         """
-        query_vector = embed_text(query)
+        from app.infra.redis_cache import RetrievalCache as _RC
+        _cache = _RC()
+        query_vector = _cache.get_embedding(query)
+        if query_vector is None:
+            query_vector = embed_text(query)
+            _cache.set_embedding(query, query_vector)
 
         with managed_session() as db:
             distance = BlockEmbedding.embedding.cosine_distance(query_vector)
@@ -83,24 +80,24 @@ class VectorRouter:
             if not results:
                 return None
 
+            # Single joined query to pull the full hierarchy — avoids 5 separate N+1 fetches
+            from sqlalchemy import func as _func
             row = results[0]
             block = row.ContentBlock
-            
-            # Re-fetch topic/chapter/subject for global fallback (or just use lazy loading)
-            topic_obj = db.query(Topic).filter(Topic.id == block.topic_id).first()
-            if not topic_obj:
+
+            hierarchy = (
+                db.query(Topic, Chapter, Book, Subject, SchoolClass)
+                .join(Chapter, Topic.chapter_id == Chapter.id)
+                .join(Book, Chapter.book_id == Book.id)
+                .join(Subject, Book.subject_id == Subject.id)
+                .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                .filter(Topic.id == block.topic_id)
+                .first()
+            )
+            if not hierarchy:
                 return None
-            chapter_obj = db.query(Chapter).filter(Chapter.id == topic_obj.chapter_id).first()
-            if not chapter_obj:
-                return None
-            book_obj = db.query(Book).filter(Book.id == chapter_obj.book_id).first()
-            if not book_obj:
-                return None
-            subject_obj = db.query(Subject).filter(Subject.id == book_obj.subject_id).first()
-            if not subject_obj:
-                return None
-            # Explicitly load SchoolClass to avoid DetachedInstanceError from lazy ORM traversal
-            school_class_obj = db.query(SchoolClass).filter(SchoolClass.id == subject_obj.class_id).first()
+
+            topic_obj, chapter_obj, _, subject_obj, school_class_obj = hierarchy
 
             route = {
                 "board_id": school_class_obj.board_id if school_class_obj else board_id,

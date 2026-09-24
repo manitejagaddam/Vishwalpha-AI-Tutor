@@ -33,10 +33,10 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         
         # Store refresh token in db
         expires_at = datetime.now(timezone.utc) + timedelta(days=7) # 7 days refresh TTL
-        store_refresh_token(db, user.id, refresh, expires_at)
+        store_refresh_token(db, str(user.id), refresh, expires_at)
         
         return AuthResponse(
-            user_id=user.id,
+            user_id=str(user.id),
             username=user.username,
             class_num=request.class_num,
             access_token=token,

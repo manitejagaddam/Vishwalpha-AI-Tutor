@@ -13,7 +13,9 @@ from sqlalchemy.orm import joinedload
 from app.infra.azure_openai_client import get_openai
 from app.infra.redis_cache import RetrievalCache
 from app.data.database import managed_session
-from app.data.models.content import ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass
+from app.data.models.content import (
+    ContentBlock, BlockEmbedding, Topic, Chapter, Book, Subject, SchoolClass, BookIngestionLog
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -48,11 +50,12 @@ def retrieve_with_confidence(
     threshold = confidence_threshold or settings.RETRIEVAL_CONFIDENCE_THRESHOLD
     class_num = routing_metadata.get("class")
     subject   = routing_metadata.get("subject")
+    board_id  = routing_metadata.get("board_id")
 
     cache = _get_cache()
 
     # ── Cache hit check ──
-    cached_chunks = cache.get_chunks(question, class_num, subject)
+    cached_chunks = cache.get_chunks(question, class_num, subject, board_id=board_id)
     if cached_chunks:
         logger.info("Retrieval cache HIT")
         confident = [c for c in cached_chunks if c.get("score", 0) >= threshold]
@@ -68,7 +71,7 @@ def retrieve_with_confidence(
     all_chunks = _cascade(query_vector, routing_metadata, top_k)
 
     # Cache all results (confident + not) for 30 days
-    cache.set_chunks(question, class_num, subject, all_chunks)
+    cache.set_chunks(question, class_num, subject, all_chunks, board_id=board_id)
 
     confident = [c for c in all_chunks if c.get("score", 0) >= threshold]
 
@@ -84,6 +87,27 @@ def retrieve_with_confidence(
         f"Confidence gate: {len(confident)}/{len(all_chunks)} chunks passed "
         f"(threshold={threshold})"
     )
+
+    # ── Ingestion quality gate ──
+    # Warn if any returned chunks come from chapters with low-confidence ingestion.
+    # This prevents a bad scan from teaching students wrong information.
+    bad_ingestion_chapters = [
+        c["metadata"].get("chapter", "?") for c in confident
+        if c.get("ingestion_status") in ("needs_review", "failed")
+    ]
+    if bad_ingestion_chapters:
+        unique_bad = list(set(bad_ingestion_chapters))
+        logger.warning(
+            f"[Retrieval] Returning blocks from low-confidence ingestion chapters: {unique_bad}. "
+            "Consider re-ingesting these chapters."
+        )
+        # Attach warning to the context string so the LLM is aware
+        warning_note = (
+            f"\n⚠️ Note: Content from chapter(s) {unique_bad} may be partially incomplete "
+            "due to low-confidence ingestion. Cross-check with textbook if needed.\n"
+        )
+        return _compress(confident) + warning_note, confident
+
     return _compress(confident), confident
 
 
@@ -179,14 +203,36 @@ def _run_query(
                 subject_obj  = r.Subject
                 cls_obj      = r.SchoolClass
 
+                # Check ingestion quality for this chapter
+                ingestion_status = None
+                try:
+                    latest_log = (
+                        db.query(BookIngestionLog.status)
+                        .filter(
+                            BookIngestionLog.book_id == chapter_obj.book_id,
+                            BookIngestionLog.chapter_number == chapter_obj.chapter_number,
+                        )
+                        .order_by(BookIngestionLog.ingested_at.desc())
+                        .first()
+                    )
+                    if latest_log:
+                        ingestion_status = latest_log.status
+                except Exception:
+                    pass
+
                 results.append({
                     "score": float(r.score) if r.score is not None else 0.0,
+                    # raw_text = verbatim textbook text — sent to LLM for answer generation
+                    # summary  = LLM-cleaned 1-2 sentences — used for scoring/display only
                     "content": block.raw_text,
+                    "summary": block.enriched_summary or "",
+                    "ingestion_status": ingestion_status,
                     "metadata": {
                         "class":   cls_obj.level     if cls_obj     else None,
                         "subject": subject_obj.name  if subject_obj else None,
                         "chapter": chapter_obj.title if chapter_obj else None,
                         "topic":   topic_obj.title   if topic_obj   else None,
+                        "keywords": block.enriched_keywords or [],
                     },
                 })
             return results
@@ -196,18 +242,31 @@ def _run_query(
 
 
 def _compress(chunks: list[dict], max_tokens: int = 1500) -> str:
-    """Reranks by score and compresses chunks into a single context string."""
+    """
+    Reranks by score and builds the context string sent to the tutor LLM.
+
+    TOKEN BUDGET DESIGN:
+    - We send enriched_summary (1-2 clean sentences) NOT raw_text.
+    - raw_text lives in content_raw_archive for auditing/migration only.
+    - This keeps the prompt tight so the master prompt, student cognitive
+      profile, and conversation history all fit within the token limit.
+    - If a block has no summary yet (e.g. ingested before this pipeline
+      version), we fall back to the first 300 chars of raw content.
+    """
     sorted_chunks = sorted(chunks, key=lambda x: x["score"], reverse=True)
     parts = []
     token_count = 0
 
     for i, chunk in enumerate(sorted_chunks):
-        tokens = len(chunk["content"]) // 4
+        # Use the LLM-generated summary — concise and clean for the tutor prompt.
+        # Fall back to truncated raw content only when summary is missing.
+        content = chunk.get("summary") or chunk["content"][:300]
+        tokens = len(content) // 4
         if token_count + tokens > max_tokens:
             break
         meta = chunk["metadata"]
         label = f"[{meta.get('chapter', '?')} — {meta.get('topic', '?')}]"
-        parts.append(f"--- Source {i+1} {label} ---\n{chunk['content']}")
+        parts.append(f"--- Source {i+1} {label} ---\n{content}")
         token_count += tokens
 
     return "\n\n".join(parts).strip()

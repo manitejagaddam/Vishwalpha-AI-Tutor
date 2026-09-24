@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print full coverage JSON")
     parser.add_argument("--log-file", action="store_true", help="Write logs to a daily file in logs/ instead of terminal")
 
+    parser.add_argument("--json-only", action="store_true", help="Stop before DB insertion and just output the JSON file")
+    
     args = parser.parse_args()
 
     # Reconfigure logging if --log-file is set
@@ -71,6 +73,7 @@ def main():
             book_natural_key=args.book_key,
             chapter_title=args.chapter,
             chapter_number=args.chapter_num,
+            json_only=args.json_only,
         )
         print(f"\n[SUCCESS] Ingestion complete!")
         print(f"   Status              : {result.get('status', 'unknown')}")
