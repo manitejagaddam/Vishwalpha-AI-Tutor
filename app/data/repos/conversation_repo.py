@@ -10,9 +10,15 @@ from sqlalchemy import select, update
 
 from app.data.models.chat import Conversation, Message, MessageContentBlock
 
-def get_conversation(db: Session, conversation_id: uuid.UUID) -> Optional[Conversation]:
-    """Fetches a conversation by ID."""
-    return db.query(Conversation).filter(Conversation.id == conversation_id).first()
+def get_conversation(db: Session, conversation_id) -> Optional[Conversation]:
+    """Fetches a conversation by ID, accepting UUID or string safely."""
+    if not conversation_id or conversation_id in ("new", "null", "undefined"):
+        return None
+    try:
+        cid = conversation_id if isinstance(conversation_id, uuid.UUID) else uuid.UUID(str(conversation_id).strip())
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return db.query(Conversation).filter(Conversation.id == cid).first()
 
 def get_or_create_conversation(
     db: Session,

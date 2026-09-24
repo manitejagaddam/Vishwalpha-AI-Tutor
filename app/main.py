@@ -8,7 +8,9 @@ from contextlib import asynccontextmanager
 import time
 import asyncio
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -63,6 +65,27 @@ def create_app() -> FastAPI:
     # ── Exception handlers
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        errs = exc.errors()
+        if errs:
+            first = errs[0]
+            loc = " -> ".join(str(l) for l in first.get("loc", []) if l != "body")
+            msg = first.get("msg", "Invalid value")
+            detail = f"{loc}: {msg}" if loc else msg
+        else:
+            detail = "Invalid request parameters"
+        logger.warning(f"Validation error on {request.method} {request.url.path}: {detail}")
+        return JSONResponse(status_code=400, content={"detail": detail})
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "An internal server error occurred. Please try again."}
+        )
 
     # ── CORS: origins and regex from settings ─────────────────────────────────
     _origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]

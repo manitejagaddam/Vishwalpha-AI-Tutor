@@ -22,11 +22,12 @@ if _db_url.startswith("postgres://"):
 
 engine = create_engine(
     _db_url,
-    pool_pre_ping=True,    # reconnects on stale connections
-    pool_recycle=1800,     # recycle connections every 30 min
-    pool_size=10,          # max persistent connections
-    max_overflow=20,       # burst capacity
-    pool_timeout=30,       # fail fast rather than hang when pool is exhausted
+    pool_pre_ping=True,       # reconnects on stale connections
+    pool_recycle=300,         # recycle connections every 5 min (prevents cloud NAT drops)
+    pool_size=10,             # max persistent connections
+    max_overflow=20,          # burst capacity
+    pool_timeout=30,          # fail fast rather than hang when pool is exhausted
+    connect_args={"connect_timeout": 15},
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -57,10 +58,13 @@ def managed_session():
 # ── FastAPI dependency (used in router handlers via Depends) ──────────────────
 
 def get_db():
-    """FastAPI dependency that yields a DB session."""
+    """FastAPI dependency that yields a DB session with rollback on error."""
     db: Session = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

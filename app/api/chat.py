@@ -112,12 +112,15 @@ async def chat_session_end_endpoint(
     (memory extraction, weak topics recalculation, learning preferences) 
     in the background so it doesn't block the client.
     """
+    if not request.conversation_id or not str(request.conversation_id).strip() or request.conversation_id in ("new", "null", "undefined"):
+        return {"status": "skipped", "detail": "Empty or new conversation_id"}
+
     # Fetch conversation to ensure it exists and belongs to user
     from app.data.database import managed_session
     with managed_session() as db:
         conv = get_conversation(db, request.conversation_id)
         if not conv or str(conv.user_id) != str(user.id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
+            return {"status": "skipped", "detail": "Conversation not found"}
             
         # Get the latest message for context
         history = get_message_history(db, request.conversation_id, limit=2)

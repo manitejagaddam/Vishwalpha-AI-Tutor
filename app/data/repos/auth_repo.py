@@ -86,9 +86,12 @@ def register_student(
 
 def login_student(db: Session, username: str, password: str) -> User | None:
     """Returns the User if credentials are valid and user is active, else None."""
-    user = db.query(User).filter(User.username == username).first()
+    cleaned = (username or "").strip()
+    user = db.query(User).filter(
+        (User.username == cleaned) | (User.email == cleaned)
+    ).first()
     if user and user.is_active and _verify_password(password, user.password_hash):
-        logger.info(f"User login: {username}")
+        logger.info(f"User login: {user.username}")
         return user
     return None
 

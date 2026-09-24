@@ -38,6 +38,47 @@ client.interceptors.request.use((config) => {
   return Promise.reject(error);
 });
 
+// Response interceptor for automatic 401 token refresh and session recovery
+client.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+
+    // If 401 Unauthorized and not already retrying and not a login/register attempt
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !originalRequest.url?.includes('/auth/')) {
+      originalRequest._retry = true;
+
+      const saved = localStorage.getItem('vishwalpha_student');
+      const studentData = saved ? JSON.parse(saved) : null;
+
+      if (studentData?.refresh_token) {
+        try {
+          const refreshRes = await axios.post(`${API_BASE}/auth/refresh?refresh_token=${encodeURIComponent(studentData.refresh_token)}`);
+          const newAccessToken = refreshRes.data.access_token;
+          studentData.access_token = newAccessToken;
+          localStorage.setItem('vishwalpha_student', JSON.stringify(studentData));
+
+          originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+          return client(originalRequest);
+        } catch (refreshErr) {
+          localStorage.removeItem('vishwalpha_student');
+          if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+            window.location.href = '/';
+          }
+          return Promise.reject(refreshErr);
+        }
+      } else {
+        localStorage.removeItem('vishwalpha_student');
+        if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+          window.location.href = '/';
+        }
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+
 export const authApi = {
   login: async (username, password) => {
     const res = await client.post('/auth/login', { username, password });

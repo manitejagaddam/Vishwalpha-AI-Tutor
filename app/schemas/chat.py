@@ -15,12 +15,29 @@ class ChatRequest(BaseModel):
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     idempotency_key: Optional[str] = None
     
-    @field_validator("conversation_id", mode="before")
-    def empty_str_to_none(cls, v):
-        if v == "":
+    @field_validator("conversation_id", "parent_message_id", "study_space_id", mode="before")
+    def empty_or_invalid_uuid_to_none(cls, v):
+        if not v or v in ("", "null", "undefined", "None"):
             return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if not v_clean:
+                return None
+            try:
+                return UUID(v_clean)
+            except Exception:
+                return None
         return v
-    
+
+    @field_validator("subject_id", mode="before")
+    def empty_subject_id_to_none(cls, v):
+        if not v or v in ("", "null", "undefined", "None"):
+            return None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+
     class Config:
         populate_by_name = True
 

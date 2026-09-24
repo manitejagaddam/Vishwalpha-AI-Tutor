@@ -173,14 +173,18 @@ class CanonicalCurriculum(BaseModel):
 # ── Quiz / Assignment Schemas ─────────────────────────────────────────────────
 
 class GenerateQuizRequest(BaseModel):
-    subject:       str
-    topic:         str
-    session_id:    str = ""
+    subject:       str = "Science"
+    topic:         Optional[str] = ""
+    session_id:    Optional[str] = ""
     source:        str = Field(
         default="manual",
         description="mid_concept | yesterday | manual"
     )
-    num_questions: int = Field(default=7, ge=5, le=10)
+    num_questions: int = Field(default=7, ge=3, le=15)
+
+    @field_validator("session_id", "topic", mode="before")
+    def none_to_empty(cls, v):
+        return "" if v is None else str(v)
 
 
 class QuizQuestionOut(BaseModel):
@@ -202,7 +206,7 @@ class GenerateQuizResponse(BaseModel):
 
 class SubmitAnswerRequest(BaseModel):
     question_id:          int
-    student_answer:       str
+    student_answer:       str = ""
     student_answer_index: Optional[int] = None
 
 
@@ -215,7 +219,11 @@ class SubmitAnswerResponse(BaseModel):
 
 class FinishQuizRequest(BaseModel):
     attempt_id: str
-    session_id: str = ""
+    session_id: Optional[str] = ""
+
+    @field_validator("session_id", mode="before")
+    def null_to_empty(cls, v):
+        return "" if v is None else str(v)
 
 
 class FinishQuizResponse(BaseModel):

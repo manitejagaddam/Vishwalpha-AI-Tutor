@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
+import uuid
+
 from app.data.database import get_db
 from app.data.models.chat import Conversation, Message, MessageContentBlock
 from app.data.models.platform import User
@@ -61,6 +63,16 @@ def list_sessions(
     return {"sessions": res}
 
 
+def _parse_session_uuid(session_id: str) -> uuid.UUID:
+    """Safely parses a session_id string into a UUID, returning 404 instead of 500 on invalid input."""
+    if not session_id or session_id in ("new", "null", "undefined"):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    try:
+        return uuid.UUID(str(session_id).strip())
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+
 @router.get("/history/{session_id}")
 def get_session_history(
     session_id: str,
@@ -70,8 +82,9 @@ def get_session_history(
     """
     Returns FULL conversation history for a session including branch information.
     """
+    sess_uuid = _parse_session_uuid(session_id)
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
@@ -79,7 +92,7 @@ def get_session_history(
 
     # All messages for building the sibling mapping
     all_messages = db.query(Message).filter(
-        Message.conversation_id == session_id
+        Message.conversation_id == sess_uuid
     ).order_by(Message.created_at.asc()).all()
 
     siblings_map = {}
@@ -146,8 +159,9 @@ def session_remark(
     current_user: User = Depends(get_current_user),
 ):
     """Returns the latest AI-generated teacher remark for a session."""
+    sess_uuid = _parse_session_uuid(session_id)
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
@@ -170,8 +184,9 @@ def update_title(
     current_user: User = Depends(get_current_user),
 ):
     """Manually set a custom title for a session."""
+    sess_uuid = _parse_session_uuid(session_id)
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
@@ -192,8 +207,9 @@ def generate_title(
     Returns the generated title and saves it to the DB.
     This mimics Claude's smart heading: short, specific, no fluff.
     """
+    sess_uuid = _parse_session_uuid(session_id)
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
