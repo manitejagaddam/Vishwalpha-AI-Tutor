@@ -226,18 +226,23 @@ export const shareApi = {
 };
 
 export const studentApi = {
-  getSessions: async (subject = "Science", studySpaceId = null) => {
-    const params = { subject };
+  getSessions: async (subject = null, studySpaceId = null) => {
+    const params = {};
+    if (subject) params.subject = subject;
     if (studySpaceId) params.study_space_id = studySpaceId;
     const res = await client.get('/sessions', { params });
     return res.data.sessions;
   },
-  getMemory: async (subject = "Science") => {
-    const res = await client.get('/student/memory', { params: { subject } });
+  getMemory: async (subject = null) => {
+    const params = {};
+    if (subject) params.subject = subject;
+    const res = await client.get('/student/memory', { params });
     return res.data.memory;
   },
-  getProfile: async (subject = "Science") => {
-    const res = await client.get('/student/profile', { params: { subject } });
+  getProfile: async (subject = null) => {
+    const params = {};
+    if (subject) params.subject = subject;
+    const res = await client.get('/student/profile', { params });
     return res.data;
   },
   getSessionRemark: async (sessionId) => {

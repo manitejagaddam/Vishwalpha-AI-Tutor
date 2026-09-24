@@ -22,23 +22,30 @@ router = APIRouter(tags=["Sessions"])
 
 @router.get("/sessions")
 def list_sessions(
-    subject: str = "Science",
+    subject: str | None = None,
     study_space_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db)
 ):
     """Returns all past sessions for the authenticated student, most recent first."""
     import uuid
-    sub = db.query(Subject).filter(Subject.name == subject).first()
-    sub_id = sub.id if sub else None
+    from sqlalchemy import func as sqlfunc
 
     convos = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
         Conversation.is_deleted == False
     )
-    # Filter by subject
-    if sub_id is not None:
-        convos = convos.filter(Conversation.subject_id == sub_id)
+
+    # Filter by subject if specified
+    if subject:
+        sub = None
+        s_clean = subject.strip()
+        if s_clean.isdigit():
+            sub = db.query(Subject).filter(Subject.id == int(s_clean)).first()
+        if not sub:
+            sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == s_clean.lower()).first()
+        if sub:
+            convos = convos.filter(Conversation.subject_id == sub.id)
         
     # Filter by study space if provided
     if study_space_id:
@@ -56,7 +63,7 @@ def list_sessions(
             "chat_title": c.title or "New Chat",
             "last_topic_name": c.last_topic_name,
             "created_at": c.created_at,
-            "subject": subject,
+            "subject": c.subject.name if c.subject else (subject or "General"),
             "study_space_id": str(c.study_space_id) if c.study_space_id else None,
         })
         

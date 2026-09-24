@@ -79,22 +79,80 @@ def generate_quiz_endpoint(
         with managed_session() as db:
             sub = None
             req_sub = (request.subject or "").strip()
-            # 1. Try if request.subject is an integer ID (e.g. "1")
-            if req_sub.isdigit():
-                sid_candidate = int(req_sub)
-                if sid_candidate > 0:
-                    sub = db.query(Subject).filter(Subject.id == sid_candidate).first()
-            # 2. Try by case-insensitive name
-            if not sub and req_sub:
-                sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == req_sub.lower()).first()
-            # 3. Fetch conversation if session_id is provided
             conv = None
+
+            # 1. Fetch conversation if session_id is provided
             if request.session_id:
                 from app.data.models.chat import Conversation
-                conv = db.query(Conversation).filter(Conversation.id == request.session_id).first()
-                if not sub and conv and conv.subject_id:
-                    sub = db.query(Subject).filter(Subject.id == conv.subject_id).first()
-            # 4. Fallback to first available subject in DB
+                try:
+                    import uuid
+                    conv_uuid = uuid.UUID(str(request.session_id))
+                    conv = db.query(Conversation).filter(Conversation.id == conv_uuid).first()
+                except Exception:
+                    conv = db.query(Conversation).filter(Conversation.id == request.session_id).first()
+
+            # 2. Try explicit request.subject if provided
+            if req_sub:
+                # 2a. Integer ID (e.g. "1")
+                if req_sub.isdigit():
+                    sid_candidate = int(req_sub)
+                    if sid_candidate > 0:
+                        sub = db.query(Subject).filter(Subject.id == sid_candidate).first()
+                # 2b. By name scoped to student's class_num
+                if not sub:
+                    from app.data.models.content import SchoolClass
+                    sub = (
+                        db.query(Subject)
+                        .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                        .filter(SchoolClass.level == class_num, sqlfunc.lower(Subject.name) == req_sub.lower())
+                        .first()
+                    )
+                # 2c. By name across any class if not found in student's class
+                if not sub:
+                    sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == req_sub.lower()).first()
+
+            # 3. If subject wasn't explicitly specified, use conversation's subject
+            if not sub and conv and conv.subject_id:
+                sub = db.query(Subject).filter(Subject.id == conv.subject_id).first()
+
+            # 4. If still no subject, check student's most recent conversation that has a subject
+            if not sub:
+                from app.data.models.chat import Conversation
+                recent_conv = (
+                    db.query(Conversation)
+                    .filter(
+                        Conversation.user_id == student.id,
+                        Conversation.subject_id.isnot(None),
+                        Conversation.is_deleted == False
+                    )
+                    .order_by(Conversation.updated_at.desc())
+                    .first()
+                )
+                if recent_conv and recent_conv.subject_id:
+                    sub = db.query(Subject).filter(Subject.id == recent_conv.subject_id).first()
+
+            # 5. If still no subject, check student's subject profile / mastery
+            if not sub:
+                from app.data.models.learning import StudentSubjectProfile
+                s_prof = (
+                    db.query(StudentSubjectProfile)
+                    .filter(StudentSubjectProfile.user_id == student.id)
+                    .first()
+                )
+                if s_prof and s_prof.subject_id:
+                    sub = db.query(Subject).filter(Subject.id == s_prof.subject_id).first()
+
+            # 6. Fallback to first available subject matching the student's class
+            if not sub:
+                from app.data.models.content import SchoolClass
+                sub = (
+                    db.query(Subject)
+                    .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                    .filter(SchoolClass.level == class_num)
+                    .first()
+                )
+
+            # 7. Ultimate fallback: first available subject in DB
             if not sub:
                 sub = db.query(Subject).first()
 

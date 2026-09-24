@@ -42,7 +42,7 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
         const studentId = student?.user_id || student?.id || student?.student_id || '';
         const data = await quizApi.generate({
           student_id: studentId,
-          subject: subject || 'Science',
+          subject: subject || undefined,
           topic: topic || '',
           source: source || 'manual',
           session_id: sessionId || '',

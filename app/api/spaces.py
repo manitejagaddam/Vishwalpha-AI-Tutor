@@ -21,7 +21,7 @@ router = APIRouter(prefix="/spaces", tags=["Study Spaces"])
 class SpaceCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=150)
     subject_id: Optional[int] = None
-    subject: Optional[str] = "Science"
+    subject: Optional[str] = None
     custom_instructions: Optional[str] = None
 
 
@@ -54,7 +54,7 @@ def list_spaces(
             "id": str(s.id),
             "title": s.title,
             "subject_id": s.subject_id,
-            "subject": s.subject.name if s.subject else "Science",
+            "subject": s.subject.name if s.subject else (subject or "General"),
             "custom_instructions": s.custom_instructions or "",
             "created_at": s.created_at.isoformat() if s.created_at else None,
         })
@@ -68,14 +68,32 @@ def create_space(
     db: DBSession = Depends(get_db),
 ):
     """Creates a new study space."""
+    from app.data.models.content import SchoolClass
+    from sqlalchemy import func as sqlfunc
+    class_num = getattr(current_user, "class_num", 10) or 10
+
     subject_id = body.subject_id
     if not subject_id and body.subject:
-        sub = db.query(Subject).filter(Subject.name == body.subject).first()
+        s_clean = body.subject.strip()
+        sub = (
+            db.query(Subject)
+            .join(SchoolClass, Subject.class_id == SchoolClass.id)
+            .filter(SchoolClass.level == class_num, sqlfunc.lower(Subject.name) == s_clean.lower())
+            .first()
+        )
+        if not sub:
+            sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == s_clean.lower()).first()
         if sub:
             subject_id = sub.id
 
     if not subject_id:
-        first_sub = db.query(Subject).first()
+        sub_class = (
+            db.query(Subject)
+            .join(SchoolClass, Subject.class_id == SchoolClass.id)
+            .filter(SchoolClass.level == class_num)
+            .first()
+        )
+        first_sub = sub_class or db.query(Subject).first()
         subject_id = first_sub.id if first_sub else 1
 
     space = StudySpace(

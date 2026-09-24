@@ -173,7 +173,7 @@ class CanonicalCurriculum(BaseModel):
 # ── Quiz / Assignment Schemas ─────────────────────────────────────────────────
 
 class GenerateQuizRequest(BaseModel):
-    subject:       str = "Science"
+    subject:       Optional[str] = None
     topic:         Optional[str] = ""
     session_id:    Optional[str] = ""
     source:        str = Field(
@@ -185,6 +185,13 @@ class GenerateQuizRequest(BaseModel):
     @field_validator("session_id", "topic", mode="before")
     def none_to_empty(cls, v):
         return "" if v is None else str(v)
+
+    @field_validator("subject", mode="before")
+    def empty_subject_to_none(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
 
 
 class QuizQuestionOut(BaseModel):
