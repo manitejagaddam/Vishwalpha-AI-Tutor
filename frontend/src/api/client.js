@@ -1,11 +1,21 @@
 import axios from 'axios';
 
+const normalizeApiUrl = (raw) => {
+  if (!raw || typeof raw !== 'string') return '';
+  let url = raw.trim().replace(/\/+$/, '');
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) {
+    // If user provided a domain without protocol (e.g. "vishwalpha-ai-tutor-production.up.railway.app")
+    url = (url.includes('localhost') || url.startsWith('127.0.0.1'))
+      ? `http://${url}`
+      : `https://${url}`;
+  }
+  return url;
+};
+
 export const PROD_API = 'https://vishwalpha-ai-tutor-production.up.railway.app';
-export const API_BASE = (
-  import.meta.env.API_URL || 
-  import.meta.env.API_BASE || 
-  (import.meta.env.PROD ? PROD_API : 'http://localhost:8000')
-).replace(/\/+$/, '');
+const rawConfiguredApi = import.meta.env.API_URL || import.meta.env.API_BASE;
+export const API_BASE = normalizeApiUrl(rawConfiguredApi) || (import.meta.env.PROD ? PROD_API : 'http://localhost:8000');
 
 const client = axios.create({
   baseURL: API_BASE,
