@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSession } from '../../context/SessionContext';
 import { useSync } from '../../context/SyncContext';
-import { chatApi, quizApi, attachmentsApi } from '../../api/client';
+import { chatApi, quizApi, attachmentsApi, API_BASE } from '../../api/client';
 import { 
   Send, Sparkles, Share2, Copy, Check, RotateCcw, 
   Edit3, EyeOff, Eye, ThumbsUp, ThumbsDown, ShieldAlert, Folder, PanelRight,
@@ -531,7 +531,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
                       <div className="flex flex-wrap gap-2.5 mb-3">
                         {msg.attachments.map((att, attIdx) => {
                           const isImg = att.content_type?.startsWith('image/') || att.url?.match(/\.(png|jpe?g|webp|gif)$/i);
-                          const fullUrl = att.url?.startsWith('http') ? att.url : `${import.meta.env.API_URL || 'http://localhost:8000'}${att.url}`;
+                          const fullUrl = att.url?.startsWith('http') ? att.url : `${API_BASE}${att.url}`;
                           return (
                             <div 
                               key={attIdx} 
