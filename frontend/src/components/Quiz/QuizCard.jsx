@@ -102,13 +102,15 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
   const handleFinish = async () => {
     setPhase('loading');
     try {
-      const res = await quizApi.finish(attemptId, sessionId);
+      const res = await quizApi.finish(attemptId, sessionId || '');
       setResults(res);
       setPhase('results');
-      refreshProfile();
-      refreshMemory();
+      if (typeof refreshProfile === 'function') refreshProfile();
+      if (typeof refreshMemory === 'function') refreshMemory();
     } catch (e) {
-      setError('Failed to compute results.');
+      console.error('Quiz finish error:', e);
+      const detail = e.response?.data?.detail || e.message || 'Failed to compute results.';
+      setError(detail);
       setPhase('error');
     }
   };

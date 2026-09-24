@@ -537,7 +537,7 @@ def extract_realtime_memory_and_nudges(question: str) -> dict:
 
 
 def append_pending_signal(
-    user_id: str, subject_id: int, conversation_id: str, signals: dict
+    user_id, subject_id: int, conversation_id, signals: dict
 ) -> None:
     """Queues a signal dict for the next batch update."""
     if not signals:
@@ -555,11 +555,26 @@ def append_pending_signal(
     if not signals:
         return
 
+    # Sanitize conversation_id into a valid UUID object or None (never empty string!)
+    conv_uuid = None
+    if conversation_id:
+        if isinstance(conversation_id, uuid.UUID):
+            conv_uuid = conversation_id
+        else:
+            cid_str = str(conversation_id).strip()
+            if cid_str:
+                try:
+                    conv_uuid = uuid.UUID(cid_str)
+                except (ValueError, TypeError):
+                    conv_uuid = None
+
+    user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
+
     with managed_session() as db:
         db.add(PendingMetricSignal(
-            user_id=user_id,
+            user_id=user_uuid,
             subject_id=subject_id,
-            conversation_id=conversation_id,
+            conversation_id=conv_uuid,
             signals=signals,
         ))
 
@@ -656,9 +671,10 @@ def update_topic_mastery_from_chat(
 
         # ── Append MasteryEvent for audit trail ───────────────────────────────
         db.flush()  # ensure mastery.id exists
+        user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
         db.add(MasteryEvent(
             mastery_id=mastery.id,
-            user_id=user_id,
+            user_id=user_uuid,
             topic_id=topic_id,
             source="chat",
             delta=mastery_boost,
@@ -701,9 +717,10 @@ def update_topic_mastery_from_quiz(
         # ── Append MasteryEvent for audit trail ───────────────────────────────
         db.flush()  # ensure mastery.id exists
         delta = mastery.mastery_level - old_mastery
+        user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
         db.add(MasteryEvent(
             mastery_id=mastery.id,
-            user_id=user_id,
+            user_id=user_uuid,
             topic_id=topic_id,
             source="quiz",
             delta=delta,

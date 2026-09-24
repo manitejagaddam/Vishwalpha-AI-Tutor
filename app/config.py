@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10_080  # 7 days
 
     # ── CORS ─────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://localhost:8000"
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://localhost:8000, https://vishwalpha-ai-tutor-production.up.railway.app"
 
     # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────────
     TF_ENABLE_ONEDNN_OPTS: str = "0"

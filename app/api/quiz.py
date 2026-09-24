@@ -279,7 +279,7 @@ def finish_quiz_endpoint(
             passed=passed,
         )
         session_id = request.session_id or None
-        append_pending_signal(user_id, subject_id, session_id or "", signals)
+        append_pending_signal(user_id, subject_id, session_id, signals)
         metrics_applied = batch_update_cognitive_profile(user_id, subject_id, session_id or "")
 
         # 6. Update student memory with quiz performance
@@ -294,7 +294,7 @@ def finish_quiz_endpoint(
                     f"Student scored {score:.0f}% on {topic} quiz. "
                     f"Needs review: {', '.join(wrong_questions[:2])}."
                 )
-                update_student_memory(user_id, subject_id, remark, context_snippet)
+                update_student_memory(str(user_id), subject_id, remark, context_snippet)
             except Exception as e:
                 logger.warning(f"Memory update after quiz failed: {e}")
 
@@ -305,22 +305,22 @@ def finish_quiz_endpoint(
                     sqlfunc.lower(Topic.title) == topic.lower()
                 ).first()
                 if topic_row:
-                    update_topic_mastery_from_quiz(user_id, topic_row.id, score, passed)
+                    update_topic_mastery_from_quiz(str(user_id), topic_row.id, score, passed)
         except Exception as e:
             logger.warning(f"Topic mastery update after quiz failed: {e}")
 
         # 8. Increment quiz count + streak
         try:
-            increment_quiz_count(user_id, subject_id)
-            increment_streak_quizzes(user_id)
-            update_student_streak(user_id)
+            increment_quiz_count(str(user_id), subject_id)
+            increment_streak_quizzes(str(user_id))
+            update_student_streak(str(user_id))
         except Exception as e:
             logger.warning(f"Quiz count/streak update failed: {e}")
 
         # 9. Invalidate session cache so subsequent chat turns pull fresh weak topics & mastery
         try:
             from app.infra.redis_cache import get_redis_cache
-            get_redis_cache().invalidate_session_state(user_id, subject_id)
+            get_redis_cache().invalidate_session_state(str(user_id), subject_id)
         except Exception as e:
             logger.warning(f"Session cache invalidation after quiz failed: {e}")
 
@@ -342,7 +342,7 @@ def finish_quiz_endpoint(
             logger.debug(f"[RealTime Sync] Quiz sync broadcast failed: {e}")
 
         return FinishQuizResponse(
-            attempt_id=request.attempt_id,
+            attempt_id=str(request.attempt_id),
             score=score,
             total=total,
             correct=correct,
@@ -350,7 +350,7 @@ def finish_quiz_endpoint(
             topic=topic,
             subject=subject_name,
             ai_feedback=ai_feedback,
-            metrics_impact=metrics_applied,
+            metrics_impact=metrics_applied or {},
         )
 
     except ValueError as exc:

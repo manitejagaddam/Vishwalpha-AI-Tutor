@@ -312,3 +312,66 @@ def compute_quiz_cognitive_signals(
         signals["learning_velocity"] = round(mcq_accuracy / 30, 2)
 
     return signals
+
+
+# ── Theory Answer Evaluator ───────────────────────────────────────────────────
+
+def evaluate_theory_answer(
+    question: str, 
+    model_answer: str, 
+    student_answer: str
+) -> tuple[bool, str]:
+    """
+    Evaluates a student's short-answer written response using LLM grading.
+    Returns (is_correct: bool, feedback: str).
+    Guards against trivial input (e.g. 'hello', single words, random characters).
+    """
+    cleaned = (student_answer or "").strip()
+    words = cleaned.split()
+
+    # Rule 1: Guard against trivial / off-topic one-word answers
+    if len(cleaned) < 8 or len(words) < 2:
+        return False, "Answer is too brief or incomplete. Key conceptual points are missing."
+
+    prompt = f"""Grade this student answer against NCERT concepts.
+
+Q: {question}
+Key points: {model_answer}
+Student: {cleaned}
+
+is_correct=false if off-topic, gibberish, greeting, joke, or wrong.
+is_correct=true if it captures the core concept, even in simple/colloquial words.
+
+Return JSON only: {{"is_correct": bool, "feedback": "<1 sentence on what was right or missing>"}}"""
+
+    try:
+        client = get_openai()
+        resp = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
+            temperature=0.0,
+            max_tokens=120,
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start != -1:
+            data = json.loads(raw[start:end + 1])
+            is_corr = bool(data.get("is_correct"))
+            fb = data.get("feedback", "")
+            return is_corr, fb
+    except Exception as exc:
+        logger.warning(f"LLM theory answer evaluation failed: {exc}")
+
+    # Fallback keyword-density check if LLM call fails
+    model_words = set(w.lower() for w in re.findall(r"\b\w{4,}\b", model_answer))
+    student_words = set(w.lower() for w in re.findall(r"\b\w{4,}\b", cleaned))
+    if not model_words or len(student_words) < 2:
+        return False, "Answer could not be verified against key concepts."
+
+    overlap = model_words.intersection(student_words)
+    ratio = len(overlap) / len(model_words)
+    if ratio >= 0.35:
+        return True, "Good answer covering key concepts."
+    return False, "Answer misses key scientific principles."

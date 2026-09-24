@@ -115,14 +115,22 @@ def submit_quiz_answer(
         if q.q_type == "mcq":
             q.is_correct = (student_answer_index is not None and
                             student_answer_index == q.correct_index)
+            explanation = q.explanation or ""
         else:
-            q.is_correct = bool(student_answer.strip())
+            from app.services.quiz_service import evaluate_theory_answer
+            is_corr, feedback = evaluate_theory_answer(
+                question=q.question,
+                model_answer=q.correct_answer or q.explanation or "",
+                student_answer=student_answer or "",
+            )
+            q.is_correct = is_corr
+            explanation = feedback or q.explanation or ""
 
         return {
             "is_correct": q.is_correct,
             "correct_index": q.correct_index,
             "correct_answer": q.correct_answer,
-            "explanation": q.explanation or "",
+            "explanation": explanation,
         }
 
 
