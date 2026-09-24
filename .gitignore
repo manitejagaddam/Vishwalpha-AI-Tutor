@@ -9,3 +9,14 @@ wheels/
 # Virtual environments
 .venv
 .env
+Reference
+Project Context
+.ai-context
+DataSet
+AGENTS.md
+PROJECT_CONTEXT.md
+PROJECT_DESCRIPTION.md
+Reference
+logs
+Artifacts
+Output
