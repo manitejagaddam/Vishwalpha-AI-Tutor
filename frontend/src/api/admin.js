@@ -1,7 +1,6 @@
 import axios from 'axios';
 
-const RAW_API_BASE = import.meta.env.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const API_BASE = RAW_API_BASE.replace(/\/+$/, '');
+import { API_BASE } from './client';
 
 const createAdminClient = (adminKey) => {
   return axios.create({

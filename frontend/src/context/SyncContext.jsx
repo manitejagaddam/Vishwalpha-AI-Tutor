@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { useSession } from './SessionContext';
+import { API_BASE } from '../api/client';
 
 const SyncContext = createContext(null);
 
@@ -34,11 +35,9 @@ export function SyncProvider({ children }) {
   const connectWebSocket = useCallback(() => {
     if (!student?.access_token) return;
 
-    // Resolve ws:// or wss:// URL
-    const rawApiBase = import.meta.env.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000';
-    const apiBase = rawApiBase.replace(/\/+$/, '');
-    const wsProto = apiBase.startsWith('https') ? 'wss:' : 'ws:';
-    const host = apiBase.replace(/^https?:\/\//, '');
+    // Resolve ws:// or wss:// URL from centralized API_BASE
+    const wsProto = API_BASE.startsWith('https') ? 'wss:' : 'ws:';
+    const host = API_BASE.replace(/^https?:\/\//, '');
     const wsUrl = `${wsProto}//${host}/sync/ws?token=${encodeURIComponent(student.access_token)}`;
 
     try {

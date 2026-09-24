@@ -43,9 +43,6 @@ RUN mkdir -p /app/uploads
 # Expose default port (Railway overrides $PORT at runtime)
 EXPOSE 8000
 
-# Container healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
-
 # Start Uvicorn bound to 0.0.0.0 and dynamic Railway $PORT
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+

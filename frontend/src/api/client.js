@@ -1,7 +1,12 @@
 import axios from 'axios';
 
-const RAW_API_BASE = import.meta.env.API_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const API_BASE = RAW_API_BASE.replace(/\/+$/, '');
+export const PROD_API = 'https://vishwalpha-ai-tutor-production.up.railway.app';
+export const API_BASE = (
+  import.meta.env.VITE_API_BASE || 
+  import.meta.env.VITE_API_URL || 
+  import.meta.env.API_URL || 
+  (import.meta.env.PROD ? PROD_API : 'http://localhost:8000')
+).replace(/\/+$/, '');
 
 const client = axios.create({
   baseURL: API_BASE,
