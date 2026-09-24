@@ -31,7 +31,9 @@ slowapi>=0.1.10
 python-multipart>=0.0.9
 aiofiles>=24.1.0
 
-httpx
+httpx[http2]
+h2
+hpack
 
 # Security: Argon2 password hashing (GPU-resistant, replaces PBKDF2)
 argon2-cffi>=23.1.0

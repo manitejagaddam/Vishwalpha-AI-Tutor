@@ -57,7 +57,7 @@ html5lib==1.1
 httpcore==1.0.9
 httpcore2==2.13.0 ; sys_platform != 'emscripten'
 httptools==0.7.1
-httpx==0.28.1
+httpx[http2]==0.28.1
 httpx2==2.13.0
 httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
 huggingface-hub==1.14.0
