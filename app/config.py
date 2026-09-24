@@ -59,6 +59,7 @@ class Settings(BaseSettings):
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://localhost:8000"
+    ALLOWED_ORIGIN_REGEX: str = r"^https?:\/\/(.*\.vercel\.app|.*\.railway\.app|localhost(:\d+)?)$"
 
     # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────────
     TF_ENABLE_ONEDNN_OPTS: str = "0"
