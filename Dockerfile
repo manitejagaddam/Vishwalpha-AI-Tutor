@@ -23,14 +23,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 WORKDIR /app
 
 # Copy dependency specifications first to leverage Docker layer caching
-COPY pyproject.toml uv.lock* requirements.txt ./
+# requirements-prod.txt is the slim runtime-only file (no PaddleOCR/torch/streamlit)
+# requirements.txt is the full dev/ingestion file — NOT copied into the image
+COPY requirements-prod.txt ./
 
 # Install Python dependencies into system environment
-RUN if [ -f "requirements.txt" ]; then \
-        uv pip install --system --no-cache -r requirements.txt; \
-    else \
-        uv pip install --system --no-cache -r pyproject.toml; \
-    fi
+RUN uv pip install --system --no-cache -r requirements-prod.txt
 
 # Copy backend application source code
 COPY app/ ./app/
