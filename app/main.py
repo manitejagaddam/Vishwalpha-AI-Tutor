@@ -14,11 +14,14 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
 from app.config import settings
 from app.data.database import init_db
 from app.middleware import RequestTracingMiddleware, SecurityHeadersMiddleware
 
-from app.api import auth, student, curriculum, chat, sessions, quiz, admin, spaces
+from app.api import auth, student, curriculum, chat, sessions, quiz, admin, spaces, attachments
 
 logger = logging.getLogger("app")
 
@@ -82,6 +85,12 @@ def create_app() -> FastAPI:
     app.include_router(quiz.router)
     app.include_router(admin.router)
     app.include_router(spaces.router)
+    app.include_router(attachments.router)
+
+    # ── Static uploads directory for student attachments
+    uploads_dir = Path("uploads")
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
     @app.get("/health", tags=["System"])
     def health_check():

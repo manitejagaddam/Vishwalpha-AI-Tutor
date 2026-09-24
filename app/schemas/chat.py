@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     subject_id: Optional[int] = None
     subject: Optional[str] = None  # Frontend sends string "Science"
     tutor_mode: str = "standard"
+    attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     idempotency_key: Optional[str] = None
     
     @field_validator("conversation_id", mode="before")
@@ -28,6 +29,7 @@ class ChatResponse(BaseModel):
     message_id: UUID
     answer: str
     sources: List[SourceInfo] = []
+    attachments: List[Dict[str, Any]] = []
     routed_chapter: str = ""
     routed_topic: str = ""
     question_type: str = "conversational"

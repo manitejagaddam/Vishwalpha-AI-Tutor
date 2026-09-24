@@ -252,14 +252,6 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         except Exception as e:
             logger.warning(f"Spaced repetition check failed: {e}")
 
-    # ── Streak (skipped if incognito) ─────────────────────────────────────────
-    if not request.incognito:
-        try:
-            update_student_streak(user.id)
-            increment_streak_questions(user.id)
-        except Exception as e:
-            logger.warning(f"Streak update failed: {e}")
-
     # ── Student memory + learning preferences (session-cached) ───────────────────────
     _sc = _get_session_cache()
     sid_int = int(subject_id_resolved) if subject_id_resolved else 0
@@ -526,12 +518,19 @@ def _post_generation_pipeline(
             question_type=generation_mode,
             metrics=metrics,
         )
-        append_pending_signal(user.id, subject_id_resolved, str(conversation_id), signals)
+        if signals:
+            # 10b: Fire-and-forget in background daemon thread (non-blocking)
+            threading.Thread(
+                target=append_pending_signal,
+                args=(str(user.id), subject_id_resolved, str(conversation_id), signals),
+                daemon=True,
+            ).start()
 
+        # 10a: Batch update streak and chat-turn counters in 1 transaction
         try:
-            increment_chat_turns(user.id, subject_id_resolved)
+            batch_increment_chat_counters(str(user.id), subject_id_resolved)
         except Exception as e:
-            logger.warning(f"Chat turn increment failed: {e}")
+            logger.warning(f"Batch counter increment failed: {e}")
 
         # ── Topic mastery ─────────────────────────────────────────────────────────
         if topic_id and generation_mode == "curriculum":

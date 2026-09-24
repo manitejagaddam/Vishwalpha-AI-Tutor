@@ -102,36 +102,14 @@ Each entry has enough detail that another developer can pick it up and implement
 
 ---
 
-## 10. Backend Optimisations (Not Yet Implemented)
+## 10. Backend Optimisations — COMPLETED
 
-These were identified during the retrieval + chat-pipeline audits. Each saves real latency or DB load.
-
-### 10a. Batch DB writes — streak + chat-turn counters
-**What:** `increment_chat_turns`, `increment_streak_questions`, and `update_student_streak` each open a separate DB connection and commit on every chat turn. That's 3 writes per turn just for counters.  
-**Fix:** Coalesce into a single `_batch_increment_counters(user_id, subject_id)` function that does one `UPDATE` touching all three rows in one transaction.  
-**File:** `app/data/cognitive_repo.py` + `app/services/chat_orchestrator.py`  
-**Estimated saving:** ~2 round-trip DB calls per chat turn.
-
-### 10b. PendingMetricSignal — fire-and-forget thread
-**What:** `append_pending_signal` currently writes to the DB synchronously in the hot path (every turn).  
-**Fix:** Move it to a background thread (like the title generation already does) so it never blocks the response.  
-**Risk:** Must handle the case where the process dies before the signal is written — acceptable since signals are low-value (they are delta adjustments, not primary data).  
-**File:** `app/services/chat_orchestrator.py`
-
-### 10c. Connection pool tuning
-**What:** FastAPI + SQLAlchemy defaults to `pool_size=5, max_overflow=10`. Under concurrent student load, the pool exhausts quickly and requests queue.  
-**Fix:** Set `pool_size=10, max_overflow=20, pool_pre_ping=True` in `app/data/database.py`. Also set `pool_timeout=30` to fail fast rather than hang.  
-**File:** `app/data/database.py`
-
-### 10d. HTTP keep-alive for Azure OpenAI calls
-**What:** The `openai` SDK creates a new TCP connection per call by default under some configs. Under high load this adds ~50–80ms per LLM call.  
-**Fix:** Pass a shared `httpx.Client` with `http2=True` into the `AzureOpenAI` constructor.  
-**File:** `app/infra/azure_openai_client.py`
-
-### 10e. Weak-topics & spaced-repetition caching (done for session, extend to quiz)
-**What:** After a quiz is completed (`update_topic_mastery_from_quiz`), the session weak-topics cache is stale.  
-**Fix:** Call `_get_session_cache().invalidate_session_state(user_id, subject_id)` in `app/api/quiz.py` after quiz submission so the next chat turn pulls a refreshed list.  
-**File:** `app/api/quiz.py`
+**Status:** Completed in Phase 20
+- **10a. Batch DB writes — streak + chat-turn counters**: Implemented `batch_increment_chat_counters(user_id, subject_id)` in `app/data/cognitive_repo.py`, coalescing streak calculation, user activity date, and profile chat turns into 1 transaction. Saved ~2 roundtrips per turn.
+- **10b. PendingMetricSignal — fire-and-forget thread**: Queues `append_pending_signal` inside a daemon thread in `chat_orchestrator.py` without blocking streaming.
+- **10c. Connection pool tuning**: Added `pool_timeout=30`, `pool_size=10, max_overflow=20, pool_pre_ping=True` in `app/data/database.py`.
+- **10d. HTTP keep-alive for Azure OpenAI calls**: Passed persistent `httpx.Client(http2=True)` with connection pooling into `AzureOpenAI` in `app/infra/azure_openai_client.py`.
+- **10e. Weak-topics & spaced-repetition caching**: Invalides session cache via `get_redis_cache().invalidate_session_state(user_id, subject_id)` in `finish_quiz_endpoint` in `app/api/quiz.py`.
 
 ---
 
