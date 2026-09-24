@@ -531,7 +531,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
                       <div className="flex flex-wrap gap-2.5 mb-3">
                         {msg.attachments.map((att, attIdx) => {
                           const isImg = att.content_type?.startsWith('image/') || att.url?.match(/\.(png|jpe?g|webp|gif)$/i);
-                          const fullUrl = att.url?.startsWith('http') ? att.url : `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}${att.url}`;
+                          const fullUrl = att.url?.startsWith('http') ? att.url : `${import.meta.env.API_URL || 'http://localhost:8000'}${att.url}`;
                           return (
                             <div 
                               key={attIdx} 
