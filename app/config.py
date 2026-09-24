@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     ADMIN_API_KEY: str = ""
 
     # ── JWT Authentication ───────────────────────────────────────────────────
-    JWT_SECRET_KEY: str = "change-me-in-production-use-openssl-rand-hex-32"
+    JWT_SECRET_KEY: str = "760c55c73996005b5edc7cac944ac64852301e601ca945e07149d5ece81ea218"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10_080  # 7 days
 
     # ── CORS ─────────────────────────────────────────────────────────────────

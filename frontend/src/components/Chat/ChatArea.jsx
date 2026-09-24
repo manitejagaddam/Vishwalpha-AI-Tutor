@@ -364,13 +364,13 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     <div className="flex flex-col h-full bg-black/20 backdrop-blur-sm relative z-0">
 
       {/* Top Header Bar with Workspace, Incognito, and Share controls */}
-      <div className="p-4 px-6 border-b border-white/5 bg-gradient-to-b from-black/70 to-transparent sticky top-0 z-10 backdrop-blur-md flex items-center justify-between">
+      <div className="p-4 px-6 border-b border-white/5 bg-linear-to-b from-black/70 to-transparent sticky top-0 z-10 backdrop-blur-md flex items-center justify-between">
         
         {/* Title & Workspace Badge */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <Sparkles className="text-indigo-400" size={20} />
-            <h1 className="text-lg font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400">
+            <h1 className="text-lg font-black tracking-tight bg-clip-text text-transparent bg-linear-to-r from-indigo-400 via-purple-400 to-pink-400">
               VishwAlpha AI
             </h1>
           </div>
@@ -474,8 +474,8 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
 
         {/* Empty state */}
         {messages.length === 0 && !yesterdayCtx && !activeQuiz && (
-          <div className="flex flex-col items-center justify-center h-full text-center mt-[-40px]">
-            <div className="w-24 h-24 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 rounded-full flex items-center justify-center mb-6 shadow-[0_0_40px_rgba(99,102,241,0.2)] border border-indigo-500/20">
+          <div className="flex flex-col items-center justify-center h-full text-center -mt-10">
+            <div className="w-24 h-24 bg-linear-to-br from-indigo-500/20 to-purple-500/20 rounded-full flex items-center justify-center mb-6 shadow-[0_0_40px_rgba(99,102,241,0.2)] border border-indigo-500/20">
               <Sparkles className="text-indigo-400 w-10 h-10" />
             </div>
             <h2 className="text-3xl font-bold mb-3 text-white">Namaste, {student.username}!</h2>
