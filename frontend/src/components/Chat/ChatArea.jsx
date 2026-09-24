@@ -38,6 +38,17 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
   const [isThinking, setIsThinking] = useState(false);
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
+  const streamAbortRef = useRef(null);  // FE-03: cancel SSE on unmount
+
+  // Cancel any in-flight SSE stream on unmount to prevent ghost state updates
+  useEffect(() => {
+    return () => {
+      if (streamAbortRef.current) {
+        streamAbortRef.current.abort();
+        streamAbortRef.current = null;
+      }
+    };
+  }, []);
 
   // ── Attachments State (Addon #3) ───────────────────────────────────────────
   const [pendingAttachments, setPendingAttachments] = useState([]);
@@ -154,7 +165,10 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     setIsThinking(true);
 
     try {
-      await chatApi.sendMessageStream(
+      // Cancel any previous in-flight stream before starting a new one
+      if (streamAbortRef.current) streamAbortRef.current.abort();
+
+      const controller = chatApi.sendMessageStream(
         {
           session_id: sessionId,
           parent_message_id: parentMessageId,
@@ -261,6 +275,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
           setIsThinking(false);
         }
       );
+      streamAbortRef.current = controller;
     } catch (e) {
       setMessages(prev => {
         const newMsgs = [...prev];

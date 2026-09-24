@@ -52,10 +52,11 @@ from app.services.quiz_service import (
     generate_quiz_ai_feedback,
     compute_quiz_cognitive_signals,
 )
-from app.data.database import managed_session
+from app.data.database import managed_session, get_db
 from app.data.models.platform import User
 from app.data.models.content import Subject, Topic
 from app.api.deps import get_current_user
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
@@ -239,16 +240,34 @@ def generate_quiz_endpoint(
 @router.post("/answer", response_model=SubmitAnswerResponse)
 def submit_answer_endpoint(
     request: SubmitAnswerRequest,
-    _student: User = Depends(get_current_user),   # auth check only
+    student: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Submit a student's answer for a single quiz question."""
+    """Submit a student's answer for a single quiz question (ownership-verified)."""
     try:
+        # ── Ownership check: ensure this question belongs to the calling student ──
+        from app.data.models.learning import QuizAttempt, QuizQuestion
+        attempt = db.query(QuizAttempt).filter(
+            QuizAttempt.id == request.attempt_id,
+            QuizAttempt.user_id == str(student.id),
+        ).first()
+        if not attempt:
+            raise HTTPException(status_code=403, detail="Attempt not found or access denied.")
+        question = db.query(QuizQuestion).filter(
+            QuizQuestion.id == request.question_id,
+            QuizQuestion.attempt_id == request.attempt_id,
+        ).first()
+        if not question:
+            raise HTTPException(status_code=404, detail="Question not found in this attempt.")
+
         result = submit_quiz_answer(
             question_id=request.question_id,
             student_answer=request.student_answer,
             student_answer_index=request.student_answer_index,
         )
         return SubmitAnswerResponse(**result)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:

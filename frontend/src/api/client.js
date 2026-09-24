@@ -24,14 +24,22 @@ const client = axios.create({
   },
 });
 
+// ── Module-level auth cache (avoids JSON.parse on every request) ──────────
+let _cachedStudent = null;
+const _getStudent = () => {
+  if (!_cachedStudent) {
+    const saved = localStorage.getItem('vishwalpha_student');
+    if (saved) _cachedStudent = JSON.parse(saved);
+  }
+  return _cachedStudent;
+};
+export const clearStudentCache = () => { _cachedStudent = null; };
+
 // Interceptor to attach JWT token
 client.interceptors.request.use((config) => {
-  const saved = localStorage.getItem('vishwalpha_student');
-  if (saved) {
-    const data = JSON.parse(saved);
-    if (data.access_token) {
-      config.headers.Authorization = `Bearer ${data.access_token}`;
-    }
+  const data = _getStudent();
+  if (data?.access_token) {
+    config.headers.Authorization = `Bearer ${data.access_token}`;
   }
   return config;
 }, (error) => {
@@ -48,19 +56,23 @@ client.interceptors.response.use(
     if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !originalRequest.url?.includes('/auth/')) {
       originalRequest._retry = true;
 
-      const saved = localStorage.getItem('vishwalpha_student');
-      const studentData = saved ? JSON.parse(saved) : null;
+      const studentData = _getStudent();
 
       if (studentData?.refresh_token) {
         try {
-          const refreshRes = await axios.post(`${API_BASE}/auth/refresh?refresh_token=${encodeURIComponent(studentData.refresh_token)}`);
+          // BL-08 fix: send refresh token in body, not URL query param
+          const refreshRes = await axios.post(`${API_BASE}/auth/refresh`, {
+            refresh_token: studentData.refresh_token
+          });
           const newAccessToken = refreshRes.data.access_token;
           studentData.access_token = newAccessToken;
+          _cachedStudent = studentData;
           localStorage.setItem('vishwalpha_student', JSON.stringify(studentData));
 
           originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
           return client(originalRequest);
         } catch (refreshErr) {
+          _cachedStudent = null;
           localStorage.removeItem('vishwalpha_student');
           if (typeof window !== 'undefined' && window.location.pathname !== '/') {
             window.location.href = '/';
@@ -68,6 +80,7 @@ client.interceptors.response.use(
           return Promise.reject(refreshErr);
         }
       } else {
+        _cachedStudent = null;
         localStorage.removeItem('vishwalpha_student');
         if (typeof window !== 'undefined' && window.location.pathname !== '/') {
           window.location.href = '/';
@@ -97,73 +110,82 @@ export const chatApi = {
     return res.data;
   },
   
-  // New SSE streaming call
-  sendMessageStream: async (data, onChunk, onDone, onError) => {
-    let token = '';
-    const saved = localStorage.getItem('vishwalpha_student');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed.access_token) token = parsed.access_token;
-    }
+  // New SSE streaming call — returns an AbortController so caller can cancel on unmount.
+  // FE-02: Hard 90-second timeout via AbortController.
+  // FE-03: Caller must call controller.abort() in useEffect cleanup.
+  sendMessageStream: (data, onChunk, onDone, onError) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
 
-    try {
-      const response = await fetch(`${API_BASE}/chat/stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify(data),
-      });
+    (async () => {
+      let token = '';
+      const saved = _getStudent();
+      if (saved?.access_token) token = saved.access_token;
 
-      if (!response.ok) {
-        let errorDetail = 'Network response was not ok';
-        try {
-          const errBody = await response.json();
-          if (errBody.detail) errorDetail = errBody.detail;
-        } catch (e) {}
-        throw new Error(errorDetail);
-      }
+      try {
+        const response = await fetch(`${API_BASE}/chat/stream`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify(data),
+          signal: controller.signal,
+        });
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buffer = '';
+        if (!response.ok) {
+          let errorDetail = 'Network response was not ok';
+          try {
+            const errBody = await response.json();
+            if (errBody.detail) errorDetail = errBody.detail;
+          } catch (e) {}
+          throw new Error(errorDetail);
+        }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep the last incomplete line in the buffer
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6);
-            if (!dataStr) continue;
-            try {
-              const parsed = JSON.parse(dataStr);
-              if (parsed.type === 'token') {
-                onChunk(parsed.content);
-              } else if (parsed.type === 'done') {
-                onDone(parsed);
-              } else if (parsed.type === 'error') {
-                onError(new Error(parsed.detail));
-              } else if (parsed.type === 'meta') {
-                // If we want to capture meta (like session_id early), we can pass it via onChunk or a new callback
-                // Re-using onChunk with a special flag is an option, but let's just pass it back for completeness
-                onChunk('', parsed);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // Keep the last incomplete line in the buffer
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.slice(6);
+              if (!dataStr) continue;
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.type === 'token') {
+                  onChunk(parsed.content);
+                } else if (parsed.type === 'done') {
+                  onDone(parsed);
+                } else if (parsed.type === 'error') {
+                  onError(new Error(parsed.detail));
+                } else if (parsed.type === 'meta') {
+                  onChunk('', parsed);
+                }
+              } catch (err) {
+                console.warn('Failed to parse SSE JSON:', dataStr, err);
               }
-            } catch (err) {
-              console.warn('Failed to parse SSE JSON:', dataStr, err);
             }
           }
         }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          onError(err);
+        }
+      } finally {
+        clearTimeout(timeout);
       }
-    } catch (err) {
-      onError(err);
-    }
+    })();
+
+    return controller;  // caller: store in ref and call controller.abort() on unmount
   },
   
   getHistory: async (sessionId) => {

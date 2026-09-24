@@ -91,7 +91,7 @@ export default function ChatPage() {
       <PanelGroup orientation="horizontal">
         
         {/* Left Sidebar Panel (Ratio: 1 part ≈ 17%) */}
-        <Panel defaultSize={17} minSize={12} maxSize={30}>
+        <Panel defaultSize={222} minSize={12} maxSize={3000}>
           <Sidebar onStartQuiz={handleStartQuiz} onNewChat={handleNewChat} />
         </Panel>
 
@@ -114,7 +114,7 @@ export default function ChatPage() {
             <PanelResizeHandle className="w-1.5 bg-black/20 hover:bg-indigo-500/50 transition-colors duration-200 cursor-col-resize flex flex-col justify-center items-center group relative z-10">
               <div className="h-8 w-1 rounded-full bg-white/20 group-hover:bg-indigo-300 transition-colors" />
             </PanelResizeHandle>
-            <Panel defaultSize={33} minSize={20} maxSize={50}>
+            <Panel defaultSize={331} minSize={20} maxSize={5000}>
               <ContextPanel />
             </Panel>
           </>

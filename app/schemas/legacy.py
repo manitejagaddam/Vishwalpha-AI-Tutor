@@ -212,6 +212,7 @@ class GenerateQuizResponse(BaseModel):
 
 
 class SubmitAnswerRequest(BaseModel):
+    attempt_id:           str  # required for ownership verification
     question_id:          int
     student_answer:       str = ""
     student_answer_index: Optional[int] = None

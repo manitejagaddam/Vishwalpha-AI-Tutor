@@ -1,3 +1,4 @@
+import hmac
 import os
 import uuid
 import hashlib
@@ -15,20 +16,52 @@ from app.data.models.learning import (
 
 logger = logging.getLogger(__name__)
 
+# ── Argon2 (preferred) with PBKDF2 fallback for legacy hashes ──────────────────
+try:
+    from argon2 import PasswordHasher
+    from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
+    _argon2_hasher = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
+    _USE_ARGON2 = True
+except ImportError:
+    _argon2_hasher = None
+    _USE_ARGON2 = False
+    logger.warning("argon2-cffi not installed — falling back to PBKDF2-SHA256. Install 'argon2-cffi' for better security.")
 
-def _hash_password(password: str, salt: bytes | None = None) -> str:
-    if salt is None:
-        salt = os.urandom(16)
+
+def _hash_password(password: str) -> str:
+    """Hash password with Argon2id if available, else PBKDF2-SHA256."""
+    if _USE_ARGON2:
+        return _argon2_hasher.hash(password)
+    # PBKDF2 fallback
+    salt = os.urandom(16)
     hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
-    return salt.hex() + ":" + hashed.hex()
+    return "pbkdf2:" + salt.hex() + ":" + hashed.hex()
 
 
 def _verify_password(password: str, hashed_str: str) -> bool:
+    """Verify password. Handles Argon2id hashes and legacy PBKDF2 hashes."""
     try:
-        salt_hex, hash_hex = hashed_str.split(":")
+        if hashed_str.startswith("$argon2"):
+            # Argon2 hash
+            if not _USE_ARGON2:
+                logger.error("Argon2 hash found but argon2-cffi not installed.")
+                return False
+            try:
+                return _argon2_hasher.verify(hashed_str, password)
+            except (VerifyMismatchError, VerificationError, InvalidHashError):
+                return False
+        # Legacy PBKDF2 (supports both old 'salt:hash' and new 'pbkdf2:salt:hash' formats)
+        parts = hashed_str.split(":")
+        if len(parts) == 3 and parts[0] == "pbkdf2":
+            _, salt_hex, hash_hex = parts
+        elif len(parts) == 2:
+            salt_hex, hash_hex = parts
+        else:
+            return False
         salt = bytes.fromhex(salt_hex)
         hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
-        return hashed.hex() == hash_hex
+        # constant-time comparison to prevent timing side-channel
+        return hmac.compare_digest(hashed.hex(), hash_hex)
     except Exception:
         return False
 
@@ -46,7 +79,7 @@ def register_student(
     if existing:
         raise ValueError("Username or email already exists.")
 
-    user_id = str(uuid.uuid4())
+    user_id = uuid.uuid4()  # UUID object — SQLAlchemy UUID column accepts both UUID and str
     user = User(
         id=user_id,
         username=username,

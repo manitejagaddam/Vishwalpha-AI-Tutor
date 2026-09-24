@@ -6,7 +6,6 @@ Session history routes - JWT protected.
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
-
 import uuid
 
 from app.data.database import get_db
@@ -16,6 +15,8 @@ from app.api.deps import get_current_user
 from app.data.models.content import Subject
 from app.data.cognitive_repo import get_subject_metrics
 from app.data.repos.conversation_repo import update_conversation_title
+from app.infra.azure_openai_client import get_openai
+from app.config import settings
 
 router = APIRouter(tags=["Sessions"])
 
@@ -107,18 +108,27 @@ def get_session_history(
         key = (m.parent_message_id, m.role)
         siblings_map.setdefault(key, []).append(str(m.id))
 
+    # ── Batch-load all content blocks in one query (eliminates N+1) ────────────────────
+    all_msg_ids = [m.id for m in all_messages]
+    all_blocks = db.query(MessageContentBlock).filter(
+        MessageContentBlock.message_id.in_(all_msg_ids)
+    ).order_by(MessageContentBlock.block_index.asc()).all()
+
+    # Index blocks by message_id for O(1) lookup
+    blocks_by_msg: dict = {}
+    for b in all_blocks:
+        blocks_by_msg.setdefault(b.message_id, []).append(b)
+
     messages = [m for m in all_messages if m.is_active_branch]
 
     recent_messages = []
     for m in messages:
-        blocks = db.query(MessageContentBlock).filter(
-            MessageContentBlock.message_id == m.id
-        ).order_by(MessageContentBlock.block_index.asc()).all()
-        tb = next((b for b in blocks if b.block_type == "text"), None)
+        msg_blocks = blocks_by_msg.get(m.id, [])
+        tb = next((b for b in msg_blocks if b.block_type == "text"), None)
         content = tb.content if tb else ""
         meta = tb.extra_data if tb and tb.extra_data else {}
         attachments = [
-            b.extra_data for b in blocks 
+            b.extra_data for b in msg_blocks
             if b.block_type in ("image", "document") and b.extra_data
         ]
         sibs = siblings_map.get((m.parent_message_id, m.role), [str(m.id)])
@@ -200,6 +210,7 @@ def update_title(
         raise HTTPException(status_code=404, detail="Session not found.")
     update_conversation_title(db, session.id, body.title.strip()[:120])
     db.commit()
+    db.refresh(session)  # refresh so ORM object reflects committed value
     return {"title": session.title}
 
 
@@ -222,12 +233,12 @@ def generate_title(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    # Grab first 3 messages to build context for the title
+    # Grab first 3 messages (6 rows with blocks) to build context for the title
     messages = (
         db.query(Message, MessageContentBlock)
         .join(MessageContentBlock, Message.id == MessageContentBlock.message_id)
         .filter(
-            Message.conversation_id == session_id,
+            Message.conversation_id == sess_uuid,   # ✅ use parsed UUID, not raw string
             Message.is_active_branch == True,
             MessageContentBlock.block_type == "text",
         )
@@ -245,10 +256,8 @@ def generate_title(
     )
 
     try:
-        from app.infra.azure_openai_client import get_openai
-        from app.config import settings
-
         client = get_openai()
+
         prompt = (
             "Generate a short, specific chat title (3-6 words, no punctuation, no quotes) "
             "for this tutoring conversation. Be precise about the topic — like Claude does it.\n\n"
@@ -283,17 +292,17 @@ def activate_branch_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     """Activates a specific message branch and adjusts the conversation tree."""
-    import uuid
     from app.data.repos.conversation_repo import activate_message_branch
 
+    sess_uuid = _parse_session_uuid(session_id)   # ✅ safe UUID parse
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
-    
-    msg = activate_message_branch(db, uuid.UUID(session_id), uuid.UUID(message_id))
+
+    msg = activate_message_branch(db, sess_uuid, uuid.UUID(message_id))
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found.")
     db.commit()
@@ -353,6 +362,15 @@ def search_conversations(
             .limit(limit - len(results))
             .all()
         )
+    # ── Batch-load search results (eliminates N+1 per message match) ───────────────
+        matched_conv_ids = [m.conversation_id for m, b in msg_matches if m.conversation_id not in found_ids]
+        if matched_conv_ids:
+            extra_convos = {c.id: c for c in db.query(Conversation).filter(
+                Conversation.id.in_(matched_conv_ids)
+            ).all()}
+        else:
+            extra_convos = {}
+
         for m, b in msg_matches:
             if m.conversation_id not in found_ids:
                 found_ids.add(m.conversation_id)
@@ -360,7 +378,7 @@ def search_conversations(
                 start = max(0, idx - 40)
                 end = min(len(b.content), idx + 60)
                 snippet = ("..." if start > 0 else "") + b.content[start:end] + ("..." if end < len(b.content) else "")
-                conv = db.query(Conversation).filter(Conversation.id == m.conversation_id).first()
+                conv = extra_convos.get(m.conversation_id)
                 results.append({
                     "id": str(m.conversation_id),
                     "chat_title": conv.title if conv else "Past Chat",
@@ -382,27 +400,34 @@ def create_share_link(
     current_user: User = Depends(get_current_user),
 ):
     """Creates a frozen read-only share link for a conversation snapshot."""
-    import secrets
     from app.data.models.chat import ShareLink
 
+    sess_uuid = _parse_session_uuid(session_id)   # ✅ safe UUID parse
     session = db.query(Conversation).filter(
-        Conversation.id == session_id,
+        Conversation.id == sess_uuid,
         Conversation.user_id == current_user.id,
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
-        
+
     messages = db.query(Message).filter(
-        Message.conversation_id == session_id,
+        Message.conversation_id == sess_uuid,
         Message.is_active_branch == True,
     ).order_by(Message.created_at.asc()).all()
-    
+
+    # Batch-load text blocks for all messages (eliminates N+1)
+    msg_ids = [m.id for m in messages]
+    text_blocks = {}
+    for b in db.query(MessageContentBlock).filter(
+        MessageContentBlock.message_id.in_(msg_ids),
+        MessageContentBlock.block_type == "text",
+    ).all():
+        if b.message_id not in text_blocks:
+            text_blocks[b.message_id] = b
+
     snapshot_msgs = []
     for m in messages:
-        tb = db.query(MessageContentBlock).filter(
-            MessageContentBlock.message_id == m.id,
-            MessageContentBlock.block_type == "text"
-        ).first()
+        tb = text_blocks.get(m.id)
         content = tb.content if tb else ""
         snapshot_msgs.append({
             "id": str(m.id),

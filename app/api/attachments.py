@@ -40,7 +40,15 @@ async def upload_attachment(
     and returns metadata ready to attach to ChatRequest.
     """
     try:
-        file_bytes = await file.read()
+        # Read up to MAX_FILE_SIZE_BYTES + 1 so we can detect oversized uploads
+        # without reading the entire multi-GB request into memory first.
+        MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+        file_bytes = await file.read(MAX_BYTES + 1)
+        if len(file_bytes) > MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File exceeds the maximum allowed size of 10 MB.",
+            )
         if not file_bytes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

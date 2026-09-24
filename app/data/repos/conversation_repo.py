@@ -10,6 +10,17 @@ from sqlalchemy import select, update
 
 from app.data.models.chat import Conversation, Message, MessageContentBlock
 
+# ── Tiktoken for accurate token counting ──────────────────────────────────────
+try:
+    import tiktoken
+    _tokenizer = tiktoken.get_encoding("cl100k_base")
+    def _count_tokens(text: str) -> int:
+        return len(_tokenizer.encode(text))
+except Exception:
+    def _count_tokens(text: str) -> int:  # type: ignore[misc]
+        return len(text) // 4  # fallback estimate
+
+
 def get_conversation(db: Session, conversation_id) -> Optional[Conversation]:
     """Fetches a conversation by ID, accepting UUID or string safely."""
     if not conversation_id or conversation_id in ("new", "null", "undefined"):
@@ -88,7 +99,7 @@ def save_message(
         bloom_level=bloom_level,
         contains_question=contains_question,
         topic_id=topic_id,
-        token_count=len(content) // 4,  # rough estimate
+        token_count=_count_tokens(content),
     )
     db.add(msg)
     db.flush()
@@ -147,8 +158,12 @@ def get_message_history(
 
     # Walk up the tree if we have a leaf
     path = []
+    seen: set = set()  # BL-02: guard against self-referencing parent loops
     current_id = leaf_message_id
     while current_id and current_id in msg_dict:
+        if current_id in seen:
+            break  # cycle detected — break to prevent infinite loop
+        seen.add(current_id)
         m = msg_dict[current_id]
         m_blocks = block_dict.get(m.id, [])
         content = "\n\n".join([b.content for b in m_blocks if b.content])
@@ -158,7 +173,7 @@ def get_message_history(
             "id": m.id
         })
         current_id = m.parent_message_id
-        
+
         if len(path) >= limit:
             break
 
@@ -207,7 +222,11 @@ def activate_message_branch(db: Session, conversation_id: uuid.UUID, message_id:
 
     # 2. Walk down children ensuring one active path to leaf
     curr = target
+    visited: set = set()  # BL-01: guard against cyclic message trees
     while True:
+        if curr.id in visited:
+            break  # cycle detected — break to prevent infinite loop
+        visited.add(curr.id)
         children = db.query(Message).filter(
             Message.conversation_id == conversation_id,
             Message.parent_message_id == curr.id,

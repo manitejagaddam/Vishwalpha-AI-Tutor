@@ -4,8 +4,10 @@ app/api/auth.py
 Authentication routes: register, login, refresh, logout, me.
 """
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import logging
 
 from app.config import settings
 from app.data.database import get_db
@@ -14,7 +16,13 @@ from app.schemas.auth import RegisterRequest, LoginRequest, AuthResponse, UserSu
 from app.api.deps import create_access_token, create_refresh_token, get_current_user
 from app.data.models.learning import StudentProfile
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+# Warn on startup if ADMIN_API_KEY is not configured
+if not settings.ADMIN_API_KEY:
+    logger.warning("ADMIN_API_KEY is not set — admin endpoints are disabled.")
 
 
 @router.post("/register", response_model=AuthResponse)
@@ -84,24 +92,28 @@ def get_me(current_user = Depends(get_current_user), db: Session = Depends(get_d
     )
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 @router.post("/refresh")
-def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
-    """Refresh an access token using a valid refresh token."""
+def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Refresh an access token using a valid refresh token (sent in request body)."""
     import hashlib
     from app.data.models.platform import UserSession
-    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+    token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
     session = db.query(UserSession).filter(
         UserSession.refresh_token_hash == token_hash,
         UserSession.revoked_at.is_(None)
     ).first()
-    
+
     if not session or session.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
-    
+
     user = session.user
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive")
-        
+
     new_access_token = create_access_token(user)
     return {"access_token": new_access_token}
 

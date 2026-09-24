@@ -164,7 +164,7 @@ export const SessionProvider = ({ children }) => {
       showContext, setShowContext,
       messages, setMessages,
       sessions, refreshSessions,
-      studySpaces, setStudySpaces,
+      studySpaces,               // read-only; mutate via refreshSpaces only
       activeSpaceId, setActiveSpaceId,
       activeSpace, refreshSpaces,
       isIncognito, setIsIncognito,

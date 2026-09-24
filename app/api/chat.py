@@ -19,7 +19,7 @@ SSE Event format (for /chat/stream):
 import logging
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest, ChatResponse
@@ -30,12 +30,19 @@ from app.services.chat_orchestrator import chat, chat_stream
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Chat"])
 
+# Reuse the global limiter from main.py
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+limiter = Limiter(key_func=get_remote_address)
+
 
 # ── Standard (blocking) chat ───────────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse)
+@limiter.limit("30/minute")
 async def chat_endpoint(
     request: ChatRequest,
+    http_request: Request = None,
     user: User = Depends(get_current_user),
 ):
     """
@@ -57,8 +64,10 @@ async def chat_endpoint(
 # ── Streaming (SSE) chat ───────────────────────────────────────────────────────
 
 @router.post("/chat/stream")
+@limiter.limit("30/minute")
 async def chat_stream_endpoint(
     request: ChatRequest,
+    http_request: Request = None,
     user: User = Depends(get_current_user),
 ):
     """
@@ -102,9 +111,11 @@ class SessionEndRequest(BaseModel):
     subject_id: int | None = None
 
 @router.post("/chat/session/end")
+@limiter.limit("10/minute")
 async def chat_session_end_endpoint(
     request: SessionEndRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request = None,
     user: User = Depends(get_current_user),
 ):
     """

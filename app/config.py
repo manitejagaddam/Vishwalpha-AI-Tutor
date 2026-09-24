@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_AUTH: str = "10/minute"
 
     # ── Admin Security ───────────────────────────────────────────────────────
-    ADMIN_API_KEY: str = ""
+    ADMIN_API_KEY: str = "admin_api_key_vishwalpha"
 
     # ── JWT Authentication ───────────────────────────────────────────────────
     JWT_SECRET_KEY: str = "760c55c73996005b5edc7cac944ac64852301e601ca945e07149d5ece81ea218"
@@ -66,14 +66,6 @@ class Settings(BaseSettings):
         "https://vishwalpha-ai-tutor.vercel.app"
     )
     ALLOWED_ORIGIN_REGEX: str = r"^https?:\/\/(.*\.vercel\.app|.*\.railway\.app|localhost(:\d+)?)$"
-
-    # ── TensorFlow (suppress oneDNN logs) ───────────────────────────────────
-    TF_ENABLE_ONEDNN_OPTS: str = "0"
-    TF_CPP_MIN_LOG_LEVEL: str = "2"
-
-    # ── Legacy (kept for backwards compat; no longer used) ──────────────
-    GROQ_API_KEY: str = ""
-    HF_TOKEN: str = ""
 
 
 @lru_cache(maxsize=1)

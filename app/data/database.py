@@ -58,10 +58,11 @@ def managed_session():
 # ── FastAPI dependency (used in router handlers via Depends) ──────────────────
 
 def get_db():
-    """FastAPI dependency that yields a DB session with rollback on error."""
+    """FastAPI dependency that yields a DB session, auto-commits on success, rolls back on error."""
     db: Session = SessionLocal()
     try:
         yield db
+        db.commit()
     except Exception:
         db.rollback()
         raise

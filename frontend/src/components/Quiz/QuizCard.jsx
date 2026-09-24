@@ -72,6 +72,7 @@ export default function QuizCard({ topic, subject, source = 'manual', sessionId 
     setSubmitting(true);
     try {
       const payload = {
+        attempt_id: attemptId,    // required for ownership verification (API-04)
         question_id: currentQ.id,
         student_answer: isMCQ ? String(selectedOption) : theoryAnswer,
         student_answer_index: isMCQ ? selectedOption : null,

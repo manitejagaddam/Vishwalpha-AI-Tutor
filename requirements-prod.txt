@@ -32,3 +32,9 @@ python-multipart>=0.0.9
 aiofiles>=24.1.0
 
 httpx
+
+# Security: Argon2 password hashing (GPU-resistant, replaces PBKDF2)
+argon2-cffi>=23.1.0
+
+# Accurate token counting for LLM context management
+tiktoken>=0.7.0
