@@ -99,18 +99,10 @@ def generate_quiz_endpoint(
                     sid_candidate = int(req_sub)
                     if sid_candidate > 0:
                         sub = db.query(Subject).filter(Subject.id == sid_candidate).first()
-                # 2b. By name scoped to student's class_num
+                # 2b & 2c. By name, scoped to class
                 if not sub:
-                    from app.data.models.content import SchoolClass
-                    sub = (
-                        db.query(Subject)
-                        .join(SchoolClass, Subject.class_id == SchoolClass.id)
-                        .filter(SchoolClass.level == class_num, sqlfunc.lower(Subject.name) == req_sub.lower())
-                        .first()
-                    )
-                # 2c. By name across any class if not found in student's class
-                if not sub:
-                    sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == req_sub.lower()).first()
+                    from app.api.deps import resolve_subject
+                    sub = resolve_subject(db, req_sub, class_num)
 
             # 3. If subject wasn't explicitly specified, use conversation's subject
             if not sub and conv and conv.subject_id:
@@ -459,7 +451,8 @@ def quiz_history_endpoint(
     subject_id = None
     if subject:
         with managed_session() as db:
-            sub = db.query(Subject).filter(Subject.name == subject).first()
+            from app.api.deps import resolve_subject
+            sub = resolve_subject(db, subject, getattr(student, "class_num", 10) or 10)
             subject_id = sub.id if sub else None
     history = get_quiz_history(student.id, subject_id)
     return {"attempts": history}
@@ -474,7 +467,8 @@ def quiz_feedback_endpoint(
 ):
     """Returns the aggregated quiz feedback record for the authenticated student/subject."""
     with managed_session() as db:
-        sub = db.query(Subject).filter(Subject.name == subject).first()
+        from app.api.deps import resolve_subject
+        sub = resolve_subject(db, subject, getattr(student, "class_num", 10) or 10)
         if not sub:
             return SubjectQuizFeedbackOut()
         subject_id = sub.id

@@ -274,6 +274,14 @@ export default function ContextPanel() {
                     );
                   })}
                 </div>
+                <div className="mt-4 pt-3 border-t border-white/10 text-center">
+                  <button
+                    onClick={() => syncMetrics(metrics)}
+                    className="text-xs bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 font-semibold py-1 px-3 rounded transition-colors"
+                  >
+                    Force Sync Metrics
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="text-center text-gray-500 p-4 bg-black/20 rounded-xl border border-white/5 text-xs">

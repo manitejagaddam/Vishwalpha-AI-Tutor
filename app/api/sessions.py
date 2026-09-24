@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 import uuid
+import secrets
 
 from app.data.database import get_db
 from app.data.models.chat import Conversation, Message, MessageContentBlock
@@ -39,12 +40,8 @@ def list_sessions(
 
     # Filter by subject if specified
     if subject:
-        sub = None
-        s_clean = subject.strip()
-        if s_clean.isdigit():
-            sub = db.query(Subject).filter(Subject.id == int(s_clean)).first()
-        if not sub:
-            sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == s_clean.lower()).first()
+        from app.api.deps import resolve_subject
+        sub = resolve_subject(db, subject, getattr(current_user, "class_num", 10) or 10)
         if sub:
             convos = convos.filter(Conversation.subject_id == sub.id)
         
@@ -185,6 +182,59 @@ def session_remark(
         raise HTTPException(status_code=404, detail="Session not found.")
     
     return {"remark": getattr(session, "remark", "") or ""}
+
+
+# ── Metrics Management ────────────────────────────────────────────────────────
+
+class UpdateMetricsRequest(BaseModel):
+    metrics: dict[str, float]
+
+
+@router.post("/sessions/{session_id}/metrics")
+def update_session_metrics(
+    session_id: str,
+    payload: UpdateMetricsRequest,
+    db: DBSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manually updates cognitive metrics for the subject associated with this session.
+    """
+    sess_uuid = _parse_session_uuid(session_id)
+    session = db.query(Conversation).filter(
+        Conversation.id == sess_uuid,
+        Conversation.user_id == current_user.id
+    ).first()
+    
+    if not session or not session.subject_id:
+        raise HTTPException(status_code=404, detail="Session or subject not found")
+        
+    from app.data.models.learning import StudentSubjectProfile
+    profile = db.query(StudentSubjectProfile).filter(
+        StudentSubjectProfile.user_id == str(current_user.id),
+        StudentSubjectProfile.subject_id == session.subject_id
+    ).first()
+    
+    if not profile:
+        profile = StudentSubjectProfile(
+            user_id=str(current_user.id),
+            subject_id=session.subject_id
+        )
+        db.add(profile)
+        
+    allowed_fields = [
+        "concept_master_score", "error_repetition_rate", "attempt_persistence",
+        "struggle_recovery_rate", "practice_intensity", "learning_velocity",
+        "knowledge_retention", "cognitive_thinking_level", "engagement_frequency",
+        "assessment_accuracy"
+    ]
+    
+    for key, value in payload.metrics.items():
+        if key in allowed_fields:
+            setattr(profile, key, float(value))
+            
+    db.commit()
+    return {"status": "success", "message": "Metrics updated successfully"}
 
 
 # ── Title Management ──────────────────────────────────────────────────────────

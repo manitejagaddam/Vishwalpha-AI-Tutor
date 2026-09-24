@@ -155,3 +155,32 @@ def verify_admin_key(
             detail="Invalid Admin API Key.",
         )
     return api_key
+
+
+def resolve_subject(db: Session, subject_name: str, class_num: int):
+    """
+    Securely resolves a subject name to the Subject row for the student's class.
+    Prevents cross-class collisions (e.g. Class 9 Science vs Class 10 Science)
+    which causes queries to fail by picking the wrong subject_id.
+    """
+    if not subject_name:
+        return None
+    from sqlalchemy import func as sqlfunc
+    from app.data.models.content import Subject, SchoolClass
+    s_clean = subject_name.strip()
+    
+    if s_clean.isdigit():
+        return db.query(Subject).filter(Subject.id == int(s_clean)).first()
+        
+    sub = (
+        db.query(Subject)
+        .join(SchoolClass, Subject.class_id == SchoolClass.id)
+        .filter(
+            sqlfunc.lower(Subject.name) == s_clean.lower(),
+            SchoolClass.level == class_num
+        )
+        .first()
+    )
+    if not sub:
+        sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == s_clean.lower()).first()
+    return sub

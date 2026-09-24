@@ -77,15 +77,17 @@ STUDENT CONTEXT (persistent memory):
 
 {review_section}"""
 
-_CONVERSATIONAL_PROMPT = """You are VishwAlpha, a friendly and encouraging AI tutor.
+_CONVERSATIONAL_PROMPT = """You are VishwAlpha, a friendly and encouraging AI tutor for Indian school students.
 The student has sent you a short conversational message. Respond naturally and briefly.
-Stay warm, positive, and encouraging. Keep it under 3 sentences.
-Reference the student's context if relevant.
+Stay warm, positive, and encouraging. Keep it under 3-4 sentences.
+Reference the student's context if relevant — use what you know about them to personalise.
 
 {teaching_style}
 
-STUDENT CONTEXT (persistent memory):
-{student_memory}"""
+STUDENT CONTEXT (persistent memory — what you know about this student):
+{student_memory}
+
+{weak_topics_section}"""
 
 
 def _build_teaching_style(prefs: dict) -> str:

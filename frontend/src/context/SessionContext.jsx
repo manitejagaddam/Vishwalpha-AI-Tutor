@@ -24,6 +24,7 @@ export const SessionProvider = ({ children }) => {
   const [metrics, setMetrics] = useState({});
   const [cognitiveSkills, setCognitiveSkills] = useState({});
   const [sessionRemark, setSessionRemark] = useState('');
+  const [subjectId, setSubjectId] = useState(null); // numeric subject_id from backend
   
   const [metricsAdjustments, setMetricsAdjustments] = useState(null);
 
@@ -33,8 +34,9 @@ export const SessionProvider = ({ children }) => {
     if (!student) return;
     try {
       const data = await studentApi.getProfile(subject);
-      setMetrics(data.metrics);
-      setCognitiveSkills(data.cognitive_skills);
+      if (data.subject_id) setSubjectId(data.subject_id);
+      if (data.metrics) setMetrics(data.metrics);
+      if (data.cognitive_skills) setCognitiveSkills(data.cognitive_skills);
     } catch (e) {
       console.error(e);
     }
@@ -117,14 +119,14 @@ export const SessionProvider = ({ children }) => {
    */
   const endSession = useCallback((overrideSessionId, overrideSubjectId) => {
     const sid = overrideSessionId || sessionId;
-    const subj = overrideSubjectId !== undefined ? overrideSubjectId : null;
+    // Resolve subject_id: prefer explicit override, then cached numeric subjectId from profile
+    const resolvedSubjectId = overrideSubjectId !== undefined ? overrideSubjectId : subjectId;
     if (!sid || !student) return;
-    // Extract numeric subject_id if subject is a string name
     const payload = { conversation_id: sid };
-    if (subj !== null) payload.subject_id = subj;
+    if (resolvedSubjectId) payload.subject_id = resolvedSubjectId;
     // Fire-and-forget — we don't await so it never blocks UI
     client.post('/chat/session/end', payload).catch(() => {});
-  }, [sessionId, student]);
+  }, [sessionId, student, subjectId]);
 
 
   // Initial load when student logs in — runs once on mount/login.
@@ -156,6 +158,26 @@ export const SessionProvider = ({ children }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSpaceId]);
 
+  const syncMetrics = useCallback(async (newMetrics) => {
+    if (!sessionId) return;
+    try {
+      await studentApi.updateMetrics(sessionId, newMetrics);
+      setMetrics(prev => ({ ...prev, ...newMetrics }));
+    } catch (e) {
+      console.error("Failed to sync metrics", e);
+    }
+  }, [sessionId]);
+
+  const addMemory = useCallback(async (fact) => {
+    if (!fact || !fact.trim()) return;
+    try {
+      await studentApi.updateMemory(fact, subject);
+      refreshMemory();
+    } catch (e) {
+      console.error("Failed to add memory fact", e);
+    }
+  }, [subject, refreshMemory]);
+
   return (
     <SessionContext.Provider value={{
       sessionId, setSessionId,
@@ -170,9 +192,10 @@ export const SessionProvider = ({ children }) => {
       isIncognito, setIsIncognito,
       searchQuery, setSearchQuery,
       activateBranch,
-      memory, refreshMemory,
-      metrics, setMetrics,
+      memory, refreshMemory, addMemory,
+      metrics, setMetrics, syncMetrics,
       cognitiveSkills, setCognitiveSkills,
+      subjectId, setSubjectId,
       refreshProfile,
       sessionRemark, setSessionRemark,
       metricsAdjustments, setMetricsAdjustments,

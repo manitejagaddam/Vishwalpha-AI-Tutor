@@ -261,6 +261,12 @@ export const studentApi = {
     const res = await client.get('/student/memory', { params });
     return res.data.memory;
   },
+  updateMemory: async (fact, subject = null) => {
+    const payload = { fact };
+    if (subject) payload.subject = subject;
+    const res = await client.post('/student/memory', payload);
+    return res.data;
+  },
   getProfile: async (subject = null) => {
     const params = {};
     if (subject) params.subject = subject;
@@ -272,7 +278,7 @@ export const studentApi = {
     return res.data.remark;
   },
   updateMetrics: async (sessionId, metrics) => {
-    const res = await client.post(`/session/${sessionId}/metrics`, { metrics });
+    const res = await client.post(`/sessions/${sessionId}/metrics`, { metrics });
     return res.data;
   },
 };

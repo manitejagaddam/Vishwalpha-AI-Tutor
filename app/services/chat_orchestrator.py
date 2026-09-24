@@ -206,6 +206,18 @@ def run_deep_session_sync(
             except Exception as e:
                 logger.warning(f"[DeepSync] SessionInsight/Task generation failed: {e}", exc_info=True)
 
+        # ── Step 4a: Drain all accumulated per-turn signals into the profile ──────
+        # This replaces the old per-turn batch trigger. Signals queued during the
+        # session (regex-based, zero-LLM) are now drained once at session end for
+        # a much more stable, session-level cognitive snapshot.
+        if subject_id:
+            try:
+                from app.data.cognitive_repo import batch_update_cognitive_profile
+                batch_update_cognitive_profile(user_id, subject_id, conversation_id)
+                logger.info(f"[DeepSync] Pending per-turn signals drained for user {user_id}, subject {subject_id}")
+            except Exception as e:
+                logger.warning(f"[DeepSync] Per-turn signal drain failed: {e}")
+
         # ── Step 4: LLM-based cognitive metric update ─────────────────────────
         if full_history and subject_id:
             try:
@@ -242,12 +254,24 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
     if not routed_topic:
         return None
     try:
-        from app.data.models.content import Topic
+        from app.data.models.content import Topic, Chapter, Book, Subject as SubjectModel, SchoolClass
         from sqlalchemy import func
         with managed_session() as db:
             query = db.query(Topic).filter(
                 func.lower(Topic.title) == routed_topic.lower()
             )
+            # Scope by subject name to prevent cross-subject mastery pollution
+            if subject and str(subject).isdigit():
+                # subject passed as subject_id integer
+                query = query.join(Chapter, Topic.chapter_id == Chapter.id)\
+                             .join(Book, Chapter.book_id == Book.id)\
+                             .filter(Book.subject_id == int(subject))
+            elif subject and not str(subject).isdigit():
+                # subject passed as name string (fallback)
+                query = query.join(Chapter, Topic.chapter_id == Chapter.id)\
+                             .join(Book, Chapter.book_id == Book.id)\
+                             .join(SubjectModel, Book.subject_id == SubjectModel.id)\
+                             .filter(func.lower(SubjectModel.name) == subject.lower())
             topic = query.first()
             return topic.id if topic else None
     except Exception:
@@ -275,8 +299,8 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     
     with managed_session() as db:
         if subject_id_resolved is None and request.subject:
-            from app.data.models.content import Subject
-            sub = db.query(Subject).filter(Subject.name == request.subject).first()
+            from app.api.deps import resolve_subject
+            sub = resolve_subject(db, request.subject, class_num)
             if sub:
                 subject_id_resolved = sub.id
 
@@ -311,8 +335,15 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         # Fallback to the first subject in the DB if somehow it's still missing 
         # (prevents foreign key crashes for cross-subject chats until cross-subject metrics are supported)
         if subject_id_resolved is None:
-            from app.data.models.content import Subject
-            first_sub = db.query(Subject).first()
+            from app.data.models.content import Subject, SchoolClass
+            first_sub = (
+                db.query(Subject)
+                .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                .filter(SchoolClass.level == class_num)
+                .first()
+            )
+            if not first_sub:
+                first_sub = db.query(Subject).first()
             if first_sub:
                 subject_id_resolved = first_sub.id
             else:
@@ -444,10 +475,28 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         memory_items = get_student_memory(user.id, subject_id_resolved)
         _sc.set_session_memory(str(user.id), sid_int, memory_items or [])
 
-    student_memory_str = (
-        "\n".join(f"- {m}" for m in memory_items)
-        if memory_items else "(no memory yet)"
-    )
+    # ── Build prioritized student memory string ───────────────────────────────
+    # Priority order: (1) goals/exams/high-signal, (2) academic preferences,
+    # (3) subject-specific struggles, (4) general habits. Capped at 15 items.
+    # This ensures the LLM always sees the most actionable context first.
+    def _build_priority_memory(items: list[str]) -> str:
+        if not items:
+            return "(no memory yet)"
+        priority_keywords = ["exam", "test", "target", "score", "board", "struggling", "weak", "class"]
+        pref_keywords = ["prefers", "learns", "best with", "language", "step-by-step", "bullet", "analogy"]
+        high, pref, other = [], [], []
+        for item in items:
+            il = item.lower()
+            if any(k in il for k in priority_keywords):
+                high.append(item)
+            elif any(k in il for k in pref_keywords):
+                pref.append(item)
+            else:
+                other.append(item)
+        ordered = high[:5] + pref[:4] + other[:6]
+        return "\n".join(f"- {m}" for m in ordered[:15])
+
+    student_memory_str = _build_priority_memory(memory_items)
 
     # ── Study Space custom instructions injection ─────────────────────────────
     if space_instructions:
@@ -729,18 +778,10 @@ def _post_generation_pipeline(
             except Exception as e:
                 logger.warning(f"Topic mastery update failed: {e}")
 
-        # ── Batch update every N turns ────────────────────────────────────────────
-        if turn_count > 0 and turn_count % settings.COGNITIVE_BATCH_SIZE == 0:
-            metrics_adjustments = batch_update_cognitive_profile(
-                user.id, subject_id_resolved, str(conversation_id)
-            )
-
-            # Re-read updated metrics from DB, refresh session cache with new values
-            with managed_session() as db:
-                fresh_metrics = get_subject_metrics(db, user.id, subject_id_resolved)
-            _sc.set_session_metrics(str(user.id), sid_int, fresh_metrics)
-            metrics = fresh_metrics
-            cognitive_skills = compute_cognitive_skills(metrics)
+        # NOTE: Cognitive metric batch_update_cognitive_profile has been moved to
+        # run_deep_session_sync (triggered at session-end / 10-min timer).
+        # Per-turn signals still queue via append_pending_signal; they are drained
+        # at session end to produce a more accurate, session-level cognitive assessment.
 
         # ── Deep Session Sync (Background) ─────────────────────────────────────────
         # Triggers every SESSION_SYNC_THRESHOLD_MINUTES to update memory & weak topics
@@ -899,6 +940,7 @@ async def chat_stream(
         system_content = _CONVERSATIONAL_PROMPT.format(
             student_memory=ctx["student_memory_str"] or "(no memory yet)",
             teaching_style=teaching_style,
+            weak_topics_section=weak_section,
         )
         temp, max_tok = 0.7, 400
 

@@ -43,7 +43,8 @@ def list_spaces(
         StudySpace.is_archived == False,
     )
     if subject:
-        sub = db.query(Subject).filter(Subject.name == subject).first()
+        from app.api.deps import resolve_subject
+        sub = resolve_subject(db, subject, getattr(current_user, "class_num", 10) or 10)
         if sub:
             query = query.filter(StudySpace.subject_id == sub.id)
 
@@ -74,15 +75,8 @@ def create_space(
 
     subject_id = body.subject_id
     if not subject_id and body.subject:
-        s_clean = body.subject.strip()
-        sub = (
-            db.query(Subject)
-            .join(SchoolClass, Subject.class_id == SchoolClass.id)
-            .filter(SchoolClass.level == class_num, sqlfunc.lower(Subject.name) == s_clean.lower())
-            .first()
-        )
-        if not sub:
-            sub = db.query(Subject).filter(sqlfunc.lower(Subject.name) == s_clean.lower()).first()
+        from app.api.deps import resolve_subject
+        sub = resolve_subject(db, body.subject, class_num)
         if sub:
             subject_id = sub.id
 
