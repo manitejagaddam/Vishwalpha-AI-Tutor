@@ -40,6 +40,8 @@ STRICT RULES:
 
 {teaching_style}
 
+CURRENT SUBJECT: {subject_context}
+
 STUDENT CONTEXT (persistent memory):
 {student_memory}
 
@@ -68,6 +70,8 @@ Do NOT give a short 3-4 line answer. Give a FULL EDUCATIONAL explanation that ma
 
 {teaching_style}
 
+CURRENT SUBJECT: {subject_context}
+
 STUDENT CONTEXT (persistent memory):
 {student_memory}
 
@@ -83,6 +87,8 @@ Stay warm, positive, and encouraging. Keep it under 3-4 sentences.
 Reference the student's context if relevant — use what you know about them to personalise.
 
 {teaching_style}
+
+CURRENT SUBJECT: {subject_context}
 
 STUDENT CONTEXT (persistent memory — what you know about this student):
 {student_memory}

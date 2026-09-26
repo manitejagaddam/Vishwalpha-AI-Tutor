@@ -286,6 +286,29 @@ class Msg:
 
 # ── Shared pre-generation setup ────────────────────────────────────────────────
 
+def _build_subject_context(db, class_num: int, subject_id: int | None) -> str:
+    if not subject_id:
+        return f"Class {class_num} (Subject not specified)"
+    
+    from app.data.models.content import Subject, Book, Chapter, Topic
+    sub = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not sub:
+        return f"Class {class_num}"
+    
+    context_lines = [f"Class {class_num}, Subject: {sub.name}", "Syllabus (Chapters and Topics):"]
+    books = db.query(Book).filter(Book.subject_id == subject_id).all()
+    for book in books:
+        chapters = db.query(Chapter).filter(Chapter.book_id == book.id).order_by(Chapter.display_order).all()
+        for ch in chapters:
+            context_lines.append(f"- Chapter {ch.chapter_number}: {ch.title}")
+            topics = db.query(Topic).filter(Topic.chapter_id == ch.id).order_by(Topic.display_order).all()
+            for topic in topics:
+                t_num = topic.topic_number + " " if topic.topic_number else ""
+                context_lines.append(f"  * {t_num}{topic.title}")
+    
+    return "\n".join(context_lines)
+
+
 def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     """
     Gathers all data needed before LLM generation:
@@ -352,6 +375,8 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
 
         conv_last_topic = conv.last_topic_name if conv else None
         parent_id = request.parent_message_id or (conv.active_message_id if conv else None)
+
+        subject_context_str = _build_subject_context(db, class_num, subject_id_resolved)
 
         # ── Per-message analytics ──────────────────────────────────────────────
         student_sentiment = detect_sentiment(request.question)
@@ -611,6 +636,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         "history":          history,
         "class_num":        class_num,
         "subject_id":       subject_id_resolved,
+        "subject_context_str": subject_context_str,
         "student_memory_str": student_memory_str,
         "learning_prefs":   learning_prefs,
         "weak_topics_str":  weak_topics_str,
@@ -861,6 +887,7 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         learning_preferences=ctx["learning_prefs"],
         weak_topics=ctx["weak_topics_str"],
         review_topics=ctx["review_topics"] if ctx["new_conversation"] else [],
+        subject_context=ctx["subject_context_str"],
         user_id=str(user.id),
         conversation_id=str(ctx["conversation_id"]),
     )
@@ -936,6 +963,7 @@ async def chat_stream(
             teaching_style=teaching_style,
             weak_topics_section=weak_section,
             review_section=review_section,
+            subject_context=ctx["subject_context_str"],
         )
         temp, max_tok = 0.3, 1500
     elif mode == "open_curriculum":
@@ -944,6 +972,7 @@ async def chat_stream(
             teaching_style=teaching_style,
             weak_topics_section=weak_section,
             review_section=review_section,
+            subject_context=ctx["subject_context_str"],
         )
         temp, max_tok = 0.5, 2000
     else:  # conversational
@@ -951,6 +980,7 @@ async def chat_stream(
             student_memory=ctx["student_memory_str"] or "(no memory yet)",
             teaching_style=teaching_style,
             weak_topics_section=weak_section,
+            subject_context=ctx["subject_context_str"],
         )
         temp, max_tok = 0.7, 400
 

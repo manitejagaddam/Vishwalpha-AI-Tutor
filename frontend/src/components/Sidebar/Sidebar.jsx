@@ -149,7 +149,8 @@ export default function Sidebar({ onStartQuiz, onNewChat }) {
               className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 appearance-none transition-all shadow-inner hover:bg-black/60"
             >
               <option value="standard">⚡ Standard Direct</option>
-              <option value="deep">🧠 Deep Socratic</option>
+              {/* disabled for testing purpose. */}
+              {/* <option value="deep">🧠 Deep Socratic</option> */}
             </select>
           </div>
 

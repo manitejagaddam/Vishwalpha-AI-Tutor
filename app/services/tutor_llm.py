@@ -145,6 +145,7 @@ class TutorLLM:
         learning_preferences: dict | None = None,
         weak_topics: str = "",
         review_topics: list[dict] | None = None,
+        subject_context: str = "",
         user_id: str | None = None,
         conversation_id: str | None = None,
     ) -> tuple[str, list[dict]]:
@@ -160,6 +161,7 @@ class TutorLLM:
             learning_preferences: Dict of learning style preferences
             weak_topics:          Formatted string of weak topics
             review_topics:        List of topics due for spaced repetition review
+            subject_context:      String detailing class, subject, and syllabus
             user_id:              For A/B experiment assignment
             conversation_id:      For logging (unused currently)
 
@@ -190,6 +192,7 @@ class TutorLLM:
                 teaching_style=teaching_style,
                 weak_topics_section=weak_section,
                 review_section=review_section,
+                subject_context=subject_context,
             )
         except KeyError as ke:
             logger.warning(
@@ -202,6 +205,7 @@ class TutorLLM:
                 teaching_style=teaching_style,
                 weak_topics_section=weak_section,
                 review_section=review_section,
+                subject_context=subject_context,
             )
 
         temp, max_tok = _mode_config(mode)
