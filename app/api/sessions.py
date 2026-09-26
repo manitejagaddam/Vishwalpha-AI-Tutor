@@ -33,9 +33,14 @@ def list_sessions(
     import uuid
     from sqlalchemy import func as sqlfunc
 
+    # BUG FIX: updated_at is NULL on brand-new conversations — it only fires on
+    # UPDATE, never INSERT. COALESCE to created_at so new sessions still sort to
+    # the top instead of falling behind NULL-last DESC ordering.
+    sort_key = sqlfunc.coalesce(Conversation.updated_at, Conversation.created_at)
+
     convos = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
-        Conversation.is_deleted == False
+        Conversation.is_deleted.is_(False),  # is_(False) safely handles NULL rows
     )
 
     # Filter by subject if specified
@@ -44,7 +49,7 @@ def list_sessions(
         sub = resolve_subject(db, subject, getattr(current_user, "class_num", 10) or 10)
         if sub:
             convos = convos.filter(Conversation.subject_id == sub.id)
-        
+
     # Filter by study space if provided
     if study_space_id:
         try:
@@ -52,20 +57,26 @@ def list_sessions(
         except Exception:
             pass
 
-    convos = convos.order_by(Conversation.updated_at.desc()).all()
-    
+    convos = convos.order_by(sort_key.desc()).all()
+
     res = []
     for c in convos:
+        # effective_at: last-active time (updated_at if set, else created_at)
+        effective_at = c.updated_at or c.created_at
         res.append({
-            "id": str(c.id),
-            "chat_title": c.title or "New Chat",
+            "id":              str(c.id),
+            "chat_title":      c.title or "New Chat",
             "last_topic_name": c.last_topic_name,
-            "created_at": c.created_at,
-            "subject": c.subject.name if c.subject else (subject or "General"),
-            "study_space_id": str(c.study_space_id) if c.study_space_id else None,
+            "subject":         c.subject.name if c.subject else (subject or "General"),
+            "subject_id":      c.subject_id,
+            "study_space_id":  str(c.study_space_id) if c.study_space_id else None,
+            "created_at":      c.created_at.isoformat() if c.created_at else None,
+            "updated_at":      effective_at.isoformat() if effective_at else None,
+            "total_messages":  c.total_messages or 0,
+            "is_pinned":       c.is_pinned,
         })
-        
-    return {"sessions": res}
+
+    return {"sessions": res, "total": len(res)}
 
 
 def _parse_session_uuid(session_id: str) -> uuid.UUID:
