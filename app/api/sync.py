@@ -33,27 +33,38 @@ async def websocket_sync_endpoint(
     WebSocket endpoint for real-time state synchronization.
     Authenticate via query param ?token=<jwt_access_token>.
     """
+    # CRITICAL: WebSocket MUST be accepted before close() can be called.
+    # If we close before accept, the browser sees readyState:3 immediately
+    # and throws "WebSocket is closed before the connection is established".
+    await websocket.accept()
+
     if not token:
-        # Check initial message for auth handshake if not in query
-        await websocket.accept()
+        # Try to receive an auth handshake message as fallback
         try:
             auth_msg = await websocket.receive_text()
             data = json.loads(auth_msg)
             token = data.get("token")
         except Exception:
-            await websocket.close(code=4001, reason="Authentication token missing")
+            await websocket.send_text(json.dumps({"event": "error", "detail": "Authentication token missing"}))
+            await websocket.close(code=4001)
             return
 
     user_id = decode_token_user_id(token)
     if not user_id:
-        await websocket.close(code=4003, reason="Invalid or expired token")
+        await websocket.send_text(json.dumps({"event": "error", "detail": "Invalid or expired token"}))
+        await websocket.close(code=4003)
         return
 
     # Store current running loop in manager
     import asyncio
     sync_manager.set_loop(asyncio.get_running_loop())
 
-    await sync_manager.connect(user_id, websocket)
+    # Register this socket (connect() also calls accept() — skip the second accept)
+    async with sync_manager._lock:
+        if user_id not in sync_manager._connections:
+            sync_manager._connections[user_id] = set()
+        sync_manager._connections[user_id].add(websocket)
+    logger.info(f"[RealTime Sync] Client connected for user={user_id}. Total active: {len(sync_manager._connections[user_id])}")
 
     # Send initial connection confirmation
     await websocket.send_text(json.dumps({
@@ -75,7 +86,6 @@ async def websocket_sync_endpoint(
                 if event_type == "ping":
                     await websocket.send_text(json.dumps({"event": "pong"}))
                 elif event_type in ("typing", "presence", "space_switch"):
-                    # Relay to other connected devices of this same student
                     await sync_manager.broadcast_to_user(
                         user_id=user_id,
                         event=event_type,
