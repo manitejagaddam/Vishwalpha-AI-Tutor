@@ -146,6 +146,7 @@ class TutorLLM:
         weak_topics: str = "",
         review_topics: list[dict] | None = None,
         subject_context: str = "",
+        student_progress: str = "",
         user_id: str | None = None,
         conversation_id: str | None = None,
     ) -> tuple[str, list[dict]]:
@@ -193,6 +194,7 @@ class TutorLLM:
                 weak_topics_section=weak_section,
                 review_section=review_section,
                 subject_context=subject_context,
+                student_progress=student_progress or "(No progress data yet)",
             )
         except KeyError as ke:
             logger.warning(
@@ -206,6 +208,7 @@ class TutorLLM:
                 weak_topics_section=weak_section,
                 review_section=review_section,
                 subject_context=subject_context,
+                student_progress=student_progress or "(No progress data yet)",
             )
 
         temp, max_tok = _mode_config(mode)

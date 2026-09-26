@@ -287,26 +287,44 @@ class Msg:
 # ── Shared pre-generation setup ────────────────────────────────────────────────
 
 def _build_subject_context(db, class_num: int, subject_id: int | None) -> str:
+    """Build syllabus tree string. Cached in Redis per subject (24h TTL)."""
     if not subject_id:
         return f"Class {class_num} (Subject not specified)"
-    
+
+    _sc = _get_session_cache()
+    cached = _sc.get_syllabus(subject_id)
+    if cached:
+        return cached
+
     from app.data.models.content import Subject, Book, Chapter, Topic
     sub = db.query(Subject).filter(Subject.id == subject_id).first()
     if not sub:
         return f"Class {class_num}"
-    
-    context_lines = [f"Class {class_num}, Subject: {sub.name}", "Syllabus (Chapters and Topics):"]
-    books = db.query(Book).filter(Book.subject_id == subject_id).all()
-    for book in books:
-        chapters = db.query(Chapter).filter(Chapter.book_id == book.id).order_by(Chapter.display_order).all()
-        for ch in chapters:
+
+    # Single query: all topics + chapters for this subject, ordered
+    rows = (
+        db.query(Topic, Chapter)
+        .join(Chapter, Topic.chapter_id == Chapter.id)
+        .join(Book, Chapter.book_id == Book.id)
+        .filter(Book.subject_id == subject_id)
+        .order_by(Chapter.display_order, Topic.display_order)
+        .all()
+    )
+
+    context_lines = [f"Class {class_num}, Subject: {sub.name}", "Syllabus (Chapters → Topics):"]
+    current_chapter = None
+    for r in rows:
+        ch = r.Chapter
+        t  = r.Topic
+        if ch.id != current_chapter:
+            current_chapter = ch.id
             context_lines.append(f"- Chapter {ch.chapter_number}: {ch.title}")
-            topics = db.query(Topic).filter(Topic.chapter_id == ch.id).order_by(Topic.display_order).all()
-            for topic in topics:
-                t_num = topic.topic_number + " " if topic.topic_number else ""
-                context_lines.append(f"  * {t_num}{topic.title}")
-    
-    return "\n".join(context_lines)
+        t_num = (t.topic_number + " ") if t.topic_number else ""
+        context_lines.append(f"  * {t_num}{t.title}")
+
+    result = "\n".join(context_lines)
+    _sc.set_syllabus(subject_id, result)
+    return result
 
 
 def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
@@ -377,6 +395,42 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         parent_id = request.parent_message_id or (conv.active_message_id if conv else None)
 
         subject_context_str = _build_subject_context(db, class_num, subject_id_resolved)
+
+        # ── Student topic progress (cached, single optimised query) ───────────
+        student_progress_str = "(No progress data yet — start learning to track your journey!)"
+        if subject_id_resolved:
+            try:
+                sid_int_prog = int(subject_id_resolved)
+                _sc_prog = _get_session_cache()
+                prog_cached = _sc_prog.get_session_progress(str(user.id), sid_int_prog)
+                if prog_cached is None:
+                    from app.data.cognitive_repo import get_student_topic_progress
+                    prog_cached = get_student_topic_progress(str(user.id), subject_id_resolved)
+                    _sc_prog.set_session_progress(str(user.id), sid_int_prog, prog_cached)
+                if prog_cached:
+                    lines = []
+                    if prog_cached.get("mastered"):
+                        lines.append("✅ Mastered topics:")
+                        for t in prog_cached["mastered"][:8]:
+                            lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
+                    if prog_cached.get("in_progress"):
+                        lines.append("📖 Currently learning (in progress):")
+                        for t in prog_cached["in_progress"][:5]:
+                            lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
+                    if prog_cached.get("next_recommended"):
+                        lines.append("🎯 Recommended next topics:")
+                        for t in prog_cached["next_recommended"]:
+                            lines.append(f"  - {t['topic_title']} ({t['chapter']})")
+                    if not prog_cached.get("mastered") and not prog_cached.get("in_progress"):
+                        not_started = prog_cached.get("not_started", [])
+                        if not_started:
+                            lines.append("🚀 You haven’t started yet — suggested first topics:")
+                            for t in not_started[:3]:
+                                lines.append(f"  - {t['topic_title']} ({t['chapter']})")
+                    if lines:
+                        student_progress_str = "\n".join(lines)
+            except Exception as _prog_err:
+                logger.warning(f"[Chat] Progress fetch failed: {_prog_err}")
 
         # ── Per-message analytics ──────────────────────────────────────────────
         student_sentiment = detect_sentiment(request.question)
@@ -637,6 +691,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         "class_num":        class_num,
         "subject_id":       subject_id_resolved,
         "subject_context_str": subject_context_str,
+        "student_progress_str": student_progress_str,
         "student_memory_str": student_memory_str,
         "learning_prefs":   learning_prefs,
         "weak_topics_str":  weak_topics_str,
@@ -702,29 +757,37 @@ def _post_generation_pipeline(
         except Exception as e:
             logger.warning(f"Failed to update session topic: {e}")
 
-    # ── Concept completion → quiz suggestion ──────────────────────────────────
+    # ── Concept completion → quiz suggestion (background, 1.5s cap) ─────────
     quiz_suggestion_obj: QuizSuggestion | None = None
-    if generation_mode == "curriculum" and routed_topic:
+    _quiz_container: list = []
+
+    def _detect_completion_bg():
         try:
             is_complete, topic_name = detect_concept_completion(answer, routed_topic)
             if is_complete:
-                subject_name = request.subject or "Science"
+                _sname = request.subject or "Science"
                 if subject_id_resolved:
                     try:
-                        with managed_session() as db:
+                        with managed_session() as _db:
                             from app.data.models.content import Subject as SubjectModel
-                            sub_obj = db.query(SubjectModel).filter(SubjectModel.id == subject_id_resolved).first()
-                            if sub_obj:
-                                subject_name = sub_obj.name
+                            _s = _db.query(SubjectModel).filter(SubjectModel.id == subject_id_resolved).first()
+                            if _s:
+                                _sname = _s.name
                     except Exception:
                         pass
-                quiz_suggestion_obj = QuizSuggestion(
+                _quiz_container.append(QuizSuggestion(
                     topic=topic_name or routed_topic,
-                    subject=subject_name,
+                    subject=_sname,
                     num_questions=7,
-                )
-        except Exception as e:
-            logger.warning(f"Concept completion detection failed: {e}")
+                ))
+        except Exception as _e:
+            logger.warning(f"Concept completion detection failed: {_e}")
+
+    if generation_mode == "curriculum" and routed_topic:
+        _ct = threading.Thread(target=_detect_completion_bg, daemon=True)
+        _ct.start()
+        _ct.join(timeout=1.5)  # Cap — don't block done event longer than 1.5s
+        quiz_suggestion_obj = _quiz_container[0] if _quiz_container else None
 
     # ── Persist Tutor Answer Node ─────────────────────────────────────────────
     with managed_session() as db:
@@ -801,18 +864,23 @@ def _post_generation_pipeline(
                 daemon=True,
             ).start()
 
-        # 10a: Batch update streak and chat-turn counters in 1 transaction
-        try:
-            batch_increment_chat_counters(str(user.id), subject_id_resolved)
-        except Exception as e:
-            logger.warning(f"Batch counter increment failed: {e}")
+        # 10a: Batch update streak and chat-turn counters in background
+        threading.Thread(
+            target=lambda: batch_increment_chat_counters(str(user.id), subject_id_resolved),
+            daemon=True,
+        ).start()
 
-        # ── Topic mastery ─────────────────────────────────────────────────────────
+        # ── Topic mastery (background, busts progress cache on update) ────────
         if topic_id and generation_mode == "curriculum":
-            try:
-                update_topic_mastery_from_chat(user.id, topic_id, student_bloom)
-            except Exception as e:
-                logger.warning(f"Topic mastery update failed: {e}")
+            _sid_bg = int(subject_id_resolved) if subject_id_resolved else 0
+            _uid_bg = str(user.id)
+            def _update_mastery_bg(_uid=_uid_bg, _tid=topic_id, _bloom=student_bloom, _sc_ref=_sc, _sid=_sid_bg):
+                try:
+                    update_topic_mastery_from_chat(_uid, _tid, _bloom)
+                    _sc_ref._safe_del(f"sess:progress:{_uid}:{_sid}")
+                except Exception as _e:
+                    logger.warning(f"Topic mastery update failed: {_e}")
+            threading.Thread(target=_update_mastery_bg, daemon=True).start()
 
         # NOTE: Cognitive metric batch_update_cognitive_profile has been moved to
         # run_deep_session_sync (triggered at session-end / 10-min timer).
@@ -888,6 +956,7 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         weak_topics=ctx["weak_topics_str"],
         review_topics=ctx["review_topics"] if ctx["new_conversation"] else [],
         subject_context=ctx["subject_context_str"],
+        student_progress=ctx["student_progress_str"],
         user_id=str(user.id),
         conversation_id=str(ctx["conversation_id"]),
     )
@@ -964,6 +1033,7 @@ async def chat_stream(
             weak_topics_section=weak_section,
             review_section=review_section,
             subject_context=ctx["subject_context_str"],
+            student_progress=ctx["student_progress_str"],
         )
         temp, max_tok = 0.3, 1500
     elif mode == "open_curriculum":
@@ -973,6 +1043,7 @@ async def chat_stream(
             weak_topics_section=weak_section,
             review_section=review_section,
             subject_context=ctx["subject_context_str"],
+            student_progress=ctx["student_progress_str"],
         )
         temp, max_tok = 0.5, 2000
     else:  # conversational
@@ -981,6 +1052,7 @@ async def chat_stream(
             teaching_style=teaching_style,
             weak_topics_section=weak_section,
             subject_context=ctx["subject_context_str"],
+            student_progress=ctx["student_progress_str"],
         )
         temp, max_tok = 0.7, 400
 

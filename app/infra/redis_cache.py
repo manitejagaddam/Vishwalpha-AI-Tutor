@@ -326,6 +326,44 @@ class RetrievalCache:
             json.dumps(topics),
         )
 
+    # ── Layer 8: Subject syllabus cache ────────────────────────────────────────
+    # Caches the full chapter/topic tree string for a subject — built by
+    # _build_subject_context(). This data only changes when a new PDF is ingested.
+    # Keyed by subject_id only (shared across all students). TTL: 24h.
+
+    _SYLLABUS_TTL = 60 * 60 * 24  # 24 hours
+
+    def get_syllabus(self, subject_id: int) -> str | None:
+        return self._safe_get(f"syllabus:{subject_id}")
+
+    def set_syllabus(self, subject_id: int, value: str) -> None:
+        self._safe_setex(f"syllabus:{subject_id}", self._SYLLABUS_TTL, value)
+
+    def invalidate_syllabus(self, subject_id: int) -> None:
+        """Call after a new PDF is ingested for this subject."""
+        self._safe_del(f"syllabus:{subject_id}")
+
+    # ── Layer 9: Student topic progress cache ──────────────────────────────────
+    # Caches the full mastered/in-progress/not-started breakdown per student per
+    # subject. Built by get_student_topic_progress(). Updated after quiz finishes
+    # or session-end sync runs. TTL: 30min (same as session window).
+
+    def get_session_progress(self, user_id: str, subject_id: int) -> dict | None:
+        raw = self._safe_get(f"sess:progress:{user_id}:{subject_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_session_progress(self, user_id: str, subject_id: int, progress: dict) -> None:
+        self._safe_setex(
+            f"sess:progress:{user_id}:{subject_id}",
+            self._SESSION_TTL,
+            json.dumps(progress),
+        )
+
     def invalidate_session_state(self, user_id: str, subject_id: int) -> None:
         """
         Called after every batch update (every 4 turns) to force a fresh DB read
@@ -336,6 +374,7 @@ class RetrievalCache:
             f"sess:prefs:{user_id}",
             f"sess:memory:{user_id}:{subject_id}",
             f"sess:weak:{user_id}:{subject_id}",
+            f"sess:progress:{user_id}:{subject_id}",
         ]
         if not self._client:
             return

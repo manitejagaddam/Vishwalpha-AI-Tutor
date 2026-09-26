@@ -846,6 +846,85 @@ def get_student_strong_topics(user_id: str, subject_id: int | None = None) -> li
         ]
 
 
+def get_student_topic_progress(user_id: str, subject_id: int) -> dict:
+    """
+    Returns a structured progress map for a student in a subject:
+      {
+        "mastered": [{"topic_title": ..., "mastery": ..., "chapter": ...}],   # ≥70%
+        "in_progress": [{"topic_title": ..., "mastery": ..., "chapter": ...}], # 10-69%
+        "not_started": [{"topic_title": ..., "chapter": ...}],                  # 0 or no row
+        "next_recommended": [{"topic_title": ..., "chapter": ...}],              # up to 3 natural next topics
+      }
+
+    Uses a single optimised JOIN across Topic → Chapter → Book → Subject.
+    This is the data that gets injected into every LLM prompt via subject_context.
+    """
+    from app.data.models.content import Book
+    from sqlalchemy import outerjoin
+
+    with managed_session() as db:
+        # ── 1. Fetch all topics for this subject with their chapter names ──────
+        rows = (
+            db.query(Topic, Chapter)
+            .join(Chapter, Topic.chapter_id == Chapter.id)
+            .join(Book, Chapter.book_id == Book.id)
+            .filter(Book.subject_id == subject_id)
+            .order_by(Chapter.display_order, Topic.display_order)
+            .all()
+        )
+
+        if not rows:
+            return {"mastered": [], "in_progress": [], "not_started": [], "next_recommended": []}
+
+        # ── 2. Fetch all mastery rows for this student in one query ───────────
+        topic_ids = [r.Topic.id for r in rows]
+        mastery_rows = (
+            db.query(TopicMastery)
+            .filter(
+                TopicMastery.user_id == user_id,
+                TopicMastery.topic_id.in_(topic_ids),
+            )
+            .all()
+        )
+        mastery_map = {m.topic_id: m for m in mastery_rows}
+
+        # ── 3. Classify topics ────────────────────────────────────────────────
+        mastered, in_progress, not_started = [], [], []
+        for r in rows:
+            t = r.Topic
+            ch = r.Chapter
+            m = mastery_map.get(t.id)
+            entry = {"topic_title": t.title, "chapter": ch.title, "chapter_num": ch.chapter_number}
+            if m is None or m.times_visited == 0:
+                entry["mastery"] = 0
+                not_started.append(entry)
+            elif m.mastery_level >= 70:
+                entry["mastery"] = round(m.mastery_level)
+                entry["bloom_level"] = m.bloom_level_reached
+                mastered.append(entry)
+            else:
+                entry["mastery"] = round(m.mastery_level)
+                entry["bloom_level"] = m.bloom_level_reached
+                in_progress.append(entry)
+
+        # ── 4. Recommended next: first 3 not-started topics after in-progress ─
+        # Natural learning order: continue in-progress first, then first not-started
+        next_recommended = []
+        for t in in_progress[:2]:
+            next_recommended.append({"topic_title": t["topic_title"], "chapter": t["chapter"]})
+        remaining_slots = 3 - len(next_recommended)
+        for t in not_started[:remaining_slots]:
+            next_recommended.append({"topic_title": t["topic_title"], "chapter": t["chapter"]})
+
+        return {
+            "mastered": mastered,
+            "in_progress": in_progress,
+            "not_started": not_started,
+            "next_recommended": next_recommended,
+        }
+
+
+
 def get_topics_due_for_review(user_id: str) -> list[dict]:
     """Returns topics whose next_review_date is today or earlier — for spaced repetition."""
     today = date.today()
