@@ -201,6 +201,53 @@ class RetrievalCache:
             json.dumps(data),
         )
 
+    # ── Layer 6: Route result cache ────────────────────────────────────────────
+    # Caches VectorRouter.route_query() results by (class_num, subject_id, query).
+    # VectorRouter embeds the question + does a pgvector search on every call.
+    # At 100 users, repeated topics (photosynthesis, newton's laws...) should only
+    # pay that cost once. 24-hour TTL balances freshness vs. cost savings.
+
+    _ROUTE_TTL = 60 * 60 * 24  # 24 hours
+
+    def get_route(self, query: str, class_num, subject_id) -> dict | None:
+        key = f"route:{class_num}:{subject_id}:{self._normalize(query)}"
+        raw = self._safe_get(key)
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_route(self, query: str, class_num, subject_id, route: dict) -> None:
+        if not route:
+            return
+        self._safe_setex(
+            f"route:{class_num}:{subject_id}:{self._normalize(query)}",
+            self._ROUTE_TTL,
+            json.dumps(route),
+        )
+
+    # ── Layer 7: Subject name→ID resolution cache ──────────────────────────────
+    # resolve_subject() fires a DB query on every request that passes ?subject=Science.
+    # This is a pure lookup (subject names don't change) — cache it for 7 days.
+
+    _SUBJ_RESOLVE_TTL = 60 * 60 * 24 * 7  # 7 days
+
+    def get_subject_id(self, name: str, class_num: int) -> int | None:
+        raw = self._safe_get(f"subj:{class_num}:{name.lower()}")
+        try:
+            return int(raw) if raw else None
+        except (ValueError, TypeError):
+            return None
+
+    def set_subject_id(self, name: str, class_num: int, subject_id: int) -> None:
+        self._safe_setex(
+            f"subj:{class_num}:{name.lower()}",
+            self._SUBJ_RESOLVE_TTL,
+            str(subject_id),
+        )
+
     # ── Layer 5: Session State Cache ───────────────────────────────────────────
     # Caches per-student, per-subject data that changes only every BATCH_TURN_INTERVAL turns:
     #   - cognitive metrics (10 scores)       key: sess:metrics:{user_id}:{subject_id}

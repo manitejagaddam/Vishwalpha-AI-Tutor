@@ -558,9 +558,18 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
                 if prev_student_msg:
                     routing_query = f"{prev_student_msg[:120]} {request.question}"
 
-        route = router.route_query(
-            routing_query, class_num=class_num, subject_id=subject_id_resolved, board_id=board_id
-        )
+        # ── Route cache check (Layer 6) ───────────────────────────────────────
+        # Identical topic queries from multiple students → 1 DB hit, N-1 cache hits.
+        route = _sc.get_route(routing_query, class_num, subject_id_resolved)
+        if route:
+            logger.info("[Router] Cache HIT")
+        else:
+            route = router.route_query(
+                routing_query, class_num=class_num, subject_id=subject_id_resolved, board_id=board_id
+            )
+            if route:
+                _sc.set_route(routing_query, class_num, subject_id_resolved, route)
+
         if route:
             routed_chapter = route.get("chapter", "")
             routed_topic   = route.get("topic", "")
@@ -587,6 +596,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         else:
             logger.info("Router found no route → open_curriculum mode")
             generation_mode = "open_curriculum"
+
 
     if attachment_context_str:
         context = (attachment_context_str + ("\n\n[Relevant NCERT Textbook Context]:\n" + context if context else "")).strip()

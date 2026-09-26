@@ -117,7 +117,12 @@ def _cascade(
     top_k: int,
     min_results: int = 3,
 ) -> list[dict]:
-    """3-level cascade: topic -> chapter -> subject scope."""
+    """3-level cascade: topic -> chapter -> subject scope.
+    
+    FIX: Always keep the highest-scoring result set seen across all levels.
+    The original code overwrote `best` unconditionally, silently discarding
+    excellent topic-scoped results when the chapter/subject level returned more rows.
+    """
     filter_levels = [
         {k: v for k, v in {
             "board_id":  routing_metadata.get("board_id"),
@@ -142,7 +147,12 @@ def _cascade(
     best: list[dict] = []
     for i, filters in enumerate(filter_levels):
         results = _run_query(query_vector, filters, top_k)
-        best = results
+        # Keep the set with the highest top-1 score (better precision > more volume)
+        if not best or (
+            results
+            and results[0].get("score", 0) > (best[0].get("score", 0) if best else 0)
+        ):
+            best = results
         if len(results) >= min_results:
             logger.info(f"Retrieval satisfied at level {i+1} ({len(results)} chunks)")
             return results
@@ -154,7 +164,11 @@ def _cascade(
 def _run_query(
     query_vector: list[float], filters: dict, top_k: int
 ) -> list[dict]:
-    """Single filtered cosine-similarity query against BlockEmbedding."""
+    """Single filtered cosine-similarity query against BlockEmbedding.
+    
+    N+1 FIX: BookIngestionLog status is now batch-loaded for all returned
+    (book_id, chapter_number) pairs in a single query, not one per row.
+    """
     with managed_session() as db:
         try:
             distance = BlockEmbedding.embedding.cosine_distance(query_vector)
@@ -174,7 +188,6 @@ def _run_query(
                 q = q.join(Subject, Book.subject_id == Subject.id)
                 q = q.join(SchoolClass, Subject.class_id == SchoolClass.id)
             else:
-                # Always join for metadata enrichment even when no filter applied
                 q = (q
                      .join(Topic, ContentBlock.topic_id == Topic.id)
                      .join(Chapter, Topic.chapter_id == Chapter.id)
@@ -195,6 +208,39 @@ def _run_query(
                 q = q.filter(func.lower(Topic.title) == str(filters["topic"]).lower())
 
             rows = q.order_by(distance).limit(top_k).all()
+
+            # ── Batch-load ingestion statuses (eliminates N+1) ────────────────
+            # One query for all (book_id, chapter_number) pairs instead of one per row.
+            book_chapter_pairs = list({
+                (r.Chapter.book_id, r.Chapter.chapter_number) for r in rows
+            })
+            ingestion_status_map: dict[tuple, str | None] = {}
+            if book_chapter_pairs:
+                from sqlalchemy import tuple_ as sql_tuple
+                try:
+                    log_rows = (
+                        db.query(
+                            BookIngestionLog.book_id,
+                            BookIngestionLog.chapter_number,
+                            BookIngestionLog.status,
+                        )
+                        .filter(
+                            sql_tuple(
+                                BookIngestionLog.book_id,
+                                BookIngestionLog.chapter_number,
+                            ).in_(book_chapter_pairs)
+                        )
+                        .order_by(BookIngestionLog.ingested_at.desc())
+                        .all()
+                    )
+                    # Keep only the latest status per (book_id, chapter_number)
+                    for lr in log_rows:
+                        key = (lr.book_id, lr.chapter_number)
+                        if key not in ingestion_status_map:
+                            ingestion_status_map[key] = lr.status
+                except Exception as e:
+                    logger.debug(f"Ingestion status batch-load error: {e}")
+
             results = []
             for r in rows:
                 block        = r.ContentBlock
@@ -203,27 +249,12 @@ def _run_query(
                 subject_obj  = r.Subject
                 cls_obj      = r.SchoolClass
 
-                # Check ingestion quality for this chapter
-                ingestion_status = None
-                try:
-                    latest_log = (
-                        db.query(BookIngestionLog.status)
-                        .filter(
-                            BookIngestionLog.book_id == chapter_obj.book_id,
-                            BookIngestionLog.chapter_number == chapter_obj.chapter_number,
-                        )
-                        .order_by(BookIngestionLog.ingested_at.desc())
-                        .first()
-                    )
-                    if latest_log:
-                        ingestion_status = latest_log.status
-                except Exception:
-                    pass
+                ingestion_status = ingestion_status_map.get(
+                    (chapter_obj.book_id, chapter_obj.chapter_number)
+                )
 
                 results.append({
                     "score": float(r.score) if r.score is not None else 0.0,
-                    # raw_text = verbatim textbook text — sent to LLM for answer generation
-                    # summary  = LLM-cleaned 1-2 sentences — used for scoring/display only
                     "content": block.raw_text,
                     "summary": block.enriched_summary or "",
                     "ingestion_status": ingestion_status,
