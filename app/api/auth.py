@@ -25,7 +25,20 @@ if not settings.ADMIN_API_KEY:
     logger.warning("ADMIN_API_KEY is not set — admin endpoints are disabled.")
 
 
-@router.post("/register", response_model=AuthResponse)
+@router.post(
+    "/register",
+    response_model=AuthResponse,
+    status_code=201,
+    summary="Register a new student account",
+    description=(
+        "Creates a new student account and returns a JWT `access_token` + `refresh_token`. "
+        "The `class_num` must be between 6 and 12. Usernames must be 3–50 characters."
+    ),
+    responses={
+        400: {"description": "Username/email already taken, or validation error"},
+        422: {"description": "Request body failed schema validation"},
+    },
+)
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new student account. Returns JWT access_token and refresh_token."""
     try:
@@ -56,7 +69,20 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/login", response_model=AuthResponse)
+@router.post(
+    "/login",
+    response_model=AuthResponse,
+    summary="Login with username and password",
+    description=(
+        "Authenticates a student and returns a JWT `access_token` (valid 7 days) and an opaque "
+        "`refresh_token`. Store both securely. Use the `access_token` in the "
+        "`Authorization: Bearer <token>` header for all protected routes."
+    ),
+    responses={
+        401: {"description": "Invalid username or password"},
+        422: {"description": "Request body failed schema validation"},
+    },
+)
 def login(request: LoginRequest, db: Session = Depends(get_db)):
     """Authenticate a student. Returns JWT access_token and refresh_token."""
     user = login_student(db, request.username, request.password)
@@ -80,7 +106,15 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/me", response_model=UserSummary)
+@router.get(
+    "/me",
+    response_model=UserSummary,
+    summary="Get current user",
+    description="Returns the identity of the currently authenticated user (resolved from JWT).",
+    responses={
+        401: {"description": "Token missing, invalid, or expired"},
+    },
+)
 def get_me(current_user = Depends(get_current_user), db: Session = Depends(get_db)):
     """Returns the currently authenticated user's summary."""
     return UserSummary(
@@ -96,7 +130,17 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-@router.post("/refresh")
+@router.post(
+    "/refresh",
+    summary="Refresh access token",
+    description=(
+        "Exchange a valid, non-expired `refresh_token` for a new `access_token`. "
+        "The refresh token is opaque (not a JWT) and expires after 7 days."
+    ),
+    responses={
+        401: {"description": "Refresh token invalid, expired, or revoked"},
+    },
+)
 def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
     """Refresh an access token using a valid refresh token (sent in request body)."""
     import hashlib
@@ -118,7 +162,17 @@ def refresh_token(body: RefreshRequest, db: Session = Depends(get_db)):
     return {"access_token": new_access_token}
 
 
-@router.post("/logout")
+@router.post(
+    "/logout",
+    summary="Logout (invalidate all sessions)",
+    description=(
+        "Revokes all active refresh tokens for the authenticated user. "
+        "The `access_token` itself is stateless and will expire naturally."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+    },
+)
 def logout(current_user = Depends(get_current_user), db: Session = Depends(get_db)):
     """Logout by invalidating all active sessions for the user."""
     from app.data.models.platform import UserSession

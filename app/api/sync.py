@@ -27,11 +27,18 @@ class BroadcastEventRequest(BaseModel):
 @router.websocket("/ws")
 async def websocket_sync_endpoint(
     websocket: WebSocket,
-    token: Optional[str] = Query(None),
+    token: Optional[str] = Query(None, description="JWT access token for authentication"),
 ):
     """
     WebSocket endpoint for real-time state synchronization.
     Authenticate via query param ?token=<jwt_access_token>.
+
+    Connection flow:
+    1. Connect: ws://<host>/sync/ws?token=<access_token>
+    2. Server sends: {"event": "connected", "data": {"user_id": "...", "active_devices": 1}}
+    3. Send ping: {"type": "ping"} -> receive {"event": "pong"}
+    4. Other event types the client can send: typing, presence, space_switch
+    5. The server broadcasts quiz_completed, space_updated events to all other tabs.
     """
     # CRITICAL: WebSocket MUST be accepted before close() can be called.
     # If we close before accept, the browser sees readyState:3 immediately
@@ -102,7 +109,15 @@ async def websocket_sync_endpoint(
         await sync_manager.disconnect(user_id, websocket)
 
 
-@router.post("/broadcast")
+@router.post(
+    "/broadcast",
+    summary="Broadcast a sync event to other devices",
+    description=(
+        "Manually triggers a real-time event broadcast to all other connected devices of the authenticated student. "
+        "Common event names: `space_switch`, `typing`, `presence`. The `data` dict is forwarded as-is."
+    ),
+    responses={401: {"description": "Token missing or invalid"}},
+)
 async def broadcast_event_endpoint(
     body: BroadcastEventRequest,
     student: User = Depends(get_current_user),
@@ -118,7 +133,12 @@ async def broadcast_event_endpoint(
     return {"status": "broadcasted", "clients_notified": sent}
 
 
-@router.get("/status")
+@router.get(
+    "/status",
+    summary="Get connected devices count",
+    description="Returns how many devices/tabs the authenticated student currently has connected via WebSocket.",
+    responses={401: {"description": "Token missing or invalid"}},
+)
 def sync_status(student: User = Depends(get_current_user)):
     """Returns connected devices count for the authenticated student."""
     return {

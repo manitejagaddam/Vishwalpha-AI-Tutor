@@ -22,7 +22,15 @@ from app.config import settings
 router = APIRouter(tags=["Sessions"])
 
 
-@router.get("/sessions")
+@router.get(
+    "/sessions",
+    summary="List all past chat sessions",
+    description=(
+        "Returns all conversations for the authenticated student, sorted most-recent-first. "
+        "Filter by `?subject=Science` or `?study_space_id=<uuid>` to narrow results."
+    ),
+    responses={401: {"description": "Token missing or invalid"}},
+)
 def list_sessions(
     subject: str | None = None,
     study_space_id: str | None = None,
@@ -89,7 +97,19 @@ def _parse_session_uuid(session_id: str) -> uuid.UUID:
         raise HTTPException(status_code=404, detail="Session not found.")
 
 
-@router.get("/history/{session_id}")
+@router.get(
+    "/history/{session_id}",
+    summary="Get full message history for a session",
+    description=(
+        "Returns all messages in the conversation (active branch only), along with "
+        "source citations, topic routing metadata, attachments, and sibling branch info for regenerations. "
+        "Also returns current cognitive metrics for the session's subject."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found or belongs to another user"},
+    },
+)
 def get_session_history(
     session_id: str,
     db: DBSession = Depends(get_db),
@@ -177,7 +197,15 @@ def get_session_history(
     }
 
 
-@router.get("/sessions/{session_id}/remark")
+@router.get(
+    "/sessions/{session_id}/remark",
+    summary="Get AI teacher remark for a session",
+    description="Returns the latest AI-generated teacher remark (motivational note) for a session.",
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found"},
+    },
+)
 def session_remark(
     session_id: str,
     db: DBSession = Depends(get_db),
@@ -201,7 +229,20 @@ class UpdateMetricsRequest(BaseModel):
     metrics: dict[str, float]
 
 
-@router.post("/sessions/{session_id}/metrics")
+@router.post(
+    "/sessions/{session_id}/metrics",
+    summary="Manually override cognitive metrics for a session",
+    description=(
+        "Updates the raw cognitive metric values for the subject associated with this session. "
+        "Accepted metric keys: `concept_master_score`, `error_repetition_rate`, `attempt_persistence`, "
+        "`struggle_recovery_rate`, `practice_intensity`, `learning_velocity`, `knowledge_retention`, "
+        "`cognitive_thinking_level`, `engagement_frequency`, `assessment_accuracy`. All values 0–100."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found or has no associated subject"},
+    },
+)
 def update_session_metrics(
     session_id: str,
     payload: UpdateMetricsRequest,
@@ -254,7 +295,15 @@ class TitleUpdateRequest(BaseModel):
     title: str
 
 
-@router.patch("/sessions/{session_id}/title")
+@router.patch(
+    "/sessions/{session_id}/title",
+    summary="Rename a session",
+    description="Manually sets a custom title for the session (max 120 characters).",
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found"},
+    },
+)
 def update_title(
     session_id: str,
     body: TitleUpdateRequest,
@@ -275,7 +324,18 @@ def update_title(
     return {"title": session.title}
 
 
-@router.post("/sessions/{session_id}/generate-title")
+@router.post(
+    "/sessions/{session_id}/generate-title",
+    summary="AI-generate a session title",
+    description=(
+        "Uses GPT to generate a short, specific title (3–6 words) from the first few messages. "
+        "Saves it to the DB and returns it. Falls back to the first student message if GPT fails."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found"},
+    },
+)
 def generate_title(
     session_id: str,
     db: DBSession = Depends(get_db),
@@ -345,7 +405,18 @@ def generate_title(
 
 # ── Message Branch Activation ────────────────────────────────────────────────
 
-@router.patch("/conversations/{session_id}/messages/{message_id}/activate")
+@router.patch(
+    "/conversations/{session_id}/messages/{message_id}/activate",
+    summary="Activate a message branch",
+    description=(
+        "Activates a specific message branch in the conversation tree (for regeneration navigation). "
+        "Used when a student clicks \u2190/\u2192 arrows to switch between AI response variants."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session or message not found"},
+    },
+)
 def activate_branch_endpoint(
     session_id: str,
     message_id: str,
@@ -372,7 +443,15 @@ def activate_branch_endpoint(
 
 # ── Conversation Search ──────────────────────────────────────────────────────
 
-@router.get("/conversations/search")
+@router.get(
+    "/conversations/search",
+    summary="Search conversations by keyword",
+    description=(
+        "Full-text search across conversation titles, topic names, and message content. "
+        "Returns up to `limit` (default 20) matching conversations with a snippet showing context."
+    ),
+    responses={401: {"description": "Token missing or invalid"}},
+)
 def search_conversations(
     q: str,
     limit: int = 20,
@@ -454,7 +533,18 @@ def search_conversations(
 
 # ── Conversation Sharing ─────────────────────────────────────────────────────
 
-@router.post("/conversations/{session_id}/share")
+@router.post(
+    "/conversations/{session_id}/share",
+    summary="Create a share link for a conversation",
+    description=(
+        "Creates a frozen read-only snapshot of the conversation and returns a public share token. "
+        "The share URL format is `/share/<token>`. The snapshot is immutable — later messages are not included."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Session not found"},
+    },
+)
 def create_share_link(
     session_id: str,
     db: DBSession = Depends(get_db),
@@ -515,7 +605,15 @@ def create_share_link(
     return {"token": token, "share_url": f"/share/{token}"}
 
 
-@router.get("/share/{token}")
+@router.get(
+    "/share/{token}",
+    summary="View a shared conversation (public)",
+    description=(
+        "Public, no-auth endpoint. Returns the frozen snapshot of a shared conversation "
+        "by its share token. Returns 404 if the token is invalid, revoked, or expired."
+    ),
+    responses={404: {"description": "Share token not found or revoked"}},
+)
 def get_shared_conversation(
     token: str,
     db: DBSession = Depends(get_db),

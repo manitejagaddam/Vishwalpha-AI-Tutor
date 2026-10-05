@@ -31,7 +31,15 @@ class SpaceUpdateRequest(BaseModel):
     is_archived: Optional[bool] = None
 
 
-@router.get("")
+@router.get(
+    "",
+    summary="List study spaces",
+    description=(
+        "Returns all active (non-archived) study spaces for the authenticated student. "
+        "Filter by `?subject=Science` to only show spaces for a specific subject."
+    ),
+    responses={401: {"description": "Token missing or invalid"}},
+)
 def list_spaces(
     subject: Optional[str] = None,
     current_user: User = Depends(get_current_user),
@@ -62,7 +70,19 @@ def list_spaces(
     return {"spaces": res}
 
 
-@router.post("")
+@router.post(
+    "",
+    status_code=201,
+    summary="Create a study space",
+    description=(
+        "Creates a new named study space. Supply either `subject_id` (integer) or `subject` (string name). "
+        "Optionally add `custom_instructions` to tune the tutor's style for this space."
+    ),
+    responses={
+        401: {"description": "Token missing or invalid"},
+        422: {"description": "Validation error (title too long or missing)"},
+    },
+)
 def create_space(
     body: SpaceCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -119,7 +139,15 @@ def create_space(
     }
 
 
-@router.patch("/{space_id}")
+@router.patch(
+    "/{space_id}",
+    summary="Update a study space",
+    description="Updates the title, custom instructions, or archived status of a study space.",
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Space not found or belongs to another user"},
+    },
+)
 def update_space(
     space_id: str,
     body: SpaceUpdateRequest,
@@ -157,7 +185,15 @@ def update_space(
     }
 
 
-@router.delete("/{space_id}")
+@router.delete(
+    "/{space_id}",
+    summary="Delete (archive) a study space",
+    description="Soft-deletes the study space by setting `is_archived=True`. The space is hidden from listings but not removed from the database.",
+    responses={
+        401: {"description": "Token missing or invalid"},
+        404: {"description": "Space not found"},
+    },
+)
 def delete_space(
     space_id: str,
     current_user: User = Depends(get_current_user),

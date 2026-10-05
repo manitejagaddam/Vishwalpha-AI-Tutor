@@ -17,7 +17,24 @@ from app.data.models.content import BookIngestionLog, Book
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
-@router.post("/ingest", response_model=IngestResponse)
+@router.post(
+    "/ingest",
+    response_model=IngestResponse,
+    summary="Ingest a PDF chapter into the curriculum database",
+    description=(
+        "Uploads and processes a textbook PDF chapter. The pipeline uses PaddleX layout analysis + "
+        "Tesseract OCR, then calls the Azure OpenAI LLM to structure content into topics, subtopics, "
+        "and content blocks with enriched summaries. Embeddings are computed and stored in pgvector. "
+        "**This is a `multipart/form-data` request** — send as a form, not JSON. "
+        "Requires `X-Admin-Key` header."
+    ),
+    responses={
+        401: {"description": "Missing or invalid X-Admin-Key"},
+        404: {"description": "PDF file not found at given path"},
+        422: {"description": "PDF structuring or validation error"},
+        500: {"description": "Ingestion pipeline error"},
+    },
+)
 async def ingest_pdf(
     file: UploadFile = File(...),
     board_name: str = Form(...),
@@ -62,7 +79,16 @@ async def ingest_pdf(
             os.remove(temp_path)
 
 
-@router.get("/ingestion-log", response_model=list[IngestLogResponse])
+@router.get(
+    "/ingestion-log",
+    response_model=list[IngestLogResponse],
+    summary="List recent ingestion log entries",
+    description=(
+        "Returns ingestion log rows, newest first. Filter by `book_natural_key` and/or "
+        "`status` (`pending`, `success`, `failed`). Default limit is 50. Requires `X-Admin-Key` header."
+    ),
+    responses={401: {"description": "Missing or invalid X-Admin-Key"}},
+)
 def get_ingestion_log(
     book_natural_key: str | None = None,
     status: str | None = None,

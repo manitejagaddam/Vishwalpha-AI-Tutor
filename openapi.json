@@ -1,0 +1,3845 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VishwAlpha AI Tutor API",
+    "description": "# VishwAlpha AI Tutor\n\nPersonalised NCERT curriculum tutor for Indian school students (Classes 6–12). Students ask questions via chat; the system retrieves relevant textbook context via pgvector RAG and generates pedagogically structured answers using Azure OpenAI.\n\n## Authentication\n\nAll protected endpoints require a JWT Bearer token in the `Authorization` header:\n\n```\nAuthorization: Bearer <access_token>\n```\n\nObtain a token from `POST /auth/login` or `POST /auth/register`. Tokens expire after **7 days** by default.\n\nAdmin-only routes (`/admin/*`) use a separate static `X-Admin-Key` header instead of JWT.\n\n## Rate Limits\n\n| Scope | Limit |\n|-------|-------|\n| Chat endpoints | 30 req / minute |\n| Session end | 10 req / minute |\n| All other reads | 120 req / minute |\n\n## SSE Streaming\n\n`POST /chat/stream` returns `text/event-stream`. Each line is `data: <json>\\n\\n`. Event types: `meta`, `token`, `done`, `error`.",
+    "contact": {
+      "name": "VishwAlpha Engineering",
+      "email": "dev@vishwalpha.app"
+    },
+    "license": {
+      "name": "Proprietary"
+    },
+    "version": "2.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "Local development"
+    },
+    {
+      "url": "https://vishwalpha-ai-tutor-production.up.railway.app",
+      "description": "Production (Railway)"
+    }
+  ],
+  "paths": {
+    "/auth/register": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Register a new student account",
+        "description": "Creates a new student account and returns a JWT `access_token` + `refresh_token`. The `class_num` must be between 6 and 12. Usernames must be 3–50 characters.",
+        "operationId": "register_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Username/email already taken, or validation error"
+          },
+          "422": {
+            "description": "Request body failed schema validation"
+          }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Login with username and password",
+        "description": "Authenticates a student and returns a JWT `access_token` (valid 7 days) and an opaque `refresh_token`. Store both securely. Use the `access_token` in the `Authorization: Bearer <token>` header for all protected routes.",
+        "operationId": "login_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid username or password"
+          },
+          "422": {
+            "description": "Request body failed schema validation"
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Get current user",
+        "description": "Returns the identity of the currently authenticated user (resolved from JWT).",
+        "operationId": "get_me_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing, invalid, or expired"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Refresh access token",
+        "description": "Exchange a valid, non-expired `refresh_token` for a new `access_token`. The refresh token is opaque (not a JWT) and expires after 7 days.",
+        "operationId": "refresh_token_auth_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Refresh token invalid, expired, or revoked"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Logout (invalidate all sessions)",
+        "description": "Revokes all active refresh tokens for the authenticated user. The `access_token` itself is stateless and will expire naturally.",
+        "operationId": "logout_auth_logout_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/chat": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Send a question (blocking JSON response)",
+        "description": "Sends a student question to the AI tutor and waits for the complete answer. The response includes the full answer text, source citations, topic routing info, and updated cognitive skill metrics. Use `/chat/stream` for real-time token streaming.",
+        "operationId": "chat_endpoint_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing, invalid, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ErrorDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (30 req/min)"
+          },
+          "500": {
+            "description": "LLM or retrieval error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/chat/stream": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Send a question (SSE streaming response)",
+        "description": "Sends a student question to the AI tutor and streams the answer in real-time via Server-Sent Events (`text/event-stream`).\n\n**SSE Event format** (one JSON object per `data:` line):\n- `{\"type\": \"meta\", \"session_id\": \"...\", \"is_session_start\": true}` — first event\n- `{\"type\": \"token\", \"content\": \"He\"}` — one per token chunk\n- `{\"type\": \"done\", \"sources\": [...], \"metrics\": {...}}` — final event\n- `{\"type\": \"error\", \"detail\": \"...\"}` — only on failure\n\nThe frontend should read the stream with `EventSource` or `fetch` + `ReadableStream`, appending `token.content` to the visible message as chunks arrive.",
+        "operationId": "chat_stream_endpoint_chat_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream (text/event-stream)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing, invalid, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ErrorDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (30 req/min)"
+          },
+          "500": {
+            "description": "LLM or retrieval error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/chat/session/end": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "End a chat session (triggers deep sync)",
+        "description": "Explicitly ends a chat session and queues the Deep Session Sync in the background. The sync extracts student memory, recalculates weak topics, and updates learning preferences. **Call this when the user navigates away from the chat page or closes the app.** Returns immediately without blocking.",
+        "operationId": "chat_session_end_endpoint_chat_session_end_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionEndRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_SessionEndResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing, invalid, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ErrorDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (10 req/min)"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/chat/feedback": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Rate a tutor message (thumbs up / down)",
+        "description": "Saves the student's rating on a specific tutor message. Use `rating=1` for thumbs-up, `rating=-1` for thumbs-down, `rating=0` to reset. Optionally include a `feedback_text` reason.",
+        "operationId": "chat_feedback_endpoint_chat_feedback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_FeedbackResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing, invalid, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_ErrorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid message_id UUID format"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/sessions": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "List all past chat sessions",
+        "description": "Returns all conversations for the authenticated student, sorted most-recent-first. Filter by `?subject=Science` or `?study_space_id=<uuid>` to narrow results.",
+        "operationId": "list_sessions_sessions_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject"
+            }
+          },
+          {
+            "name": "study_space_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Study Space Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/history/{session_id}": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Get full message history for a session",
+        "description": "Returns all messages in the conversation (active branch only), along with source citations, topic routing metadata, attachments, and sibling branch info for regenerations. Also returns current cognitive metrics for the session's subject.",
+        "operationId": "get_session_history_history__session_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found or belongs to another user"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/remark": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Get AI teacher remark for a session",
+        "description": "Returns the latest AI-generated teacher remark (motivational note) for a session.",
+        "operationId": "session_remark_sessions__session_id__remark_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/metrics": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Manually override cognitive metrics for a session",
+        "description": "Updates the raw cognitive metric values for the subject associated with this session. Accepted metric keys: `concept_master_score`, `error_repetition_rate`, `attempt_persistence`, `struggle_recovery_rate`, `practice_intensity`, `learning_velocity`, `knowledge_retention`, `cognitive_thinking_level`, `engagement_frequency`, `assessment_accuracy`. All values 0–100.",
+        "operationId": "update_session_metrics_sessions__session_id__metrics_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetricsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found or has no associated subject"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/title": {
+      "patch": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Rename a session",
+        "description": "Manually sets a custom title for the session (max 120 characters).",
+        "operationId": "update_title_sessions__session_id__title_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TitleUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/generate-title": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "AI-generate a session title",
+        "description": "Uses GPT to generate a short, specific title (3–6 words) from the first few messages. Saves it to the DB and returns it. Falls back to the first student message if GPT fails.",
+        "operationId": "generate_title_sessions__session_id__generate_title_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{session_id}/messages/{message_id}/activate": {
+      "patch": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Activate a message branch",
+        "description": "Activates a specific message branch in the conversation tree (for regeneration navigation). Used when a student clicks ←/→ arrows to switch between AI response variants.",
+        "operationId": "activate_branch_endpoint_conversations__session_id__messages__message_id__activate_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session or message not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/search": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Search conversations by keyword",
+        "description": "Full-text search across conversation titles, topic names, and message content. Returns up to `limit` (default 20) matching conversations with a snippet showing context.",
+        "operationId": "search_conversations_conversations_search_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{session_id}/share": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Create a share link for a conversation",
+        "description": "Creates a frozen read-only snapshot of the conversation and returns a public share token. The share URL format is `/share/<token>`. The snapshot is immutable — later messages are not included.",
+        "operationId": "create_share_link_conversations__session_id__share_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/share/{token}": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "View a shared conversation (public)",
+        "description": "Public, no-auth endpoint. Returns the frozen snapshot of a shared conversation by its share token. Returns 404 if the token is invalid, revoked, or expired.",
+        "operationId": "get_shared_conversation_share__token__get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Share token not found or revoked"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/student/profile": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get Profile",
+        "description": "Returns the student's basic identity.\nPass ?subject=Science to also get the resolved numeric subject_id.\nCache subject_id in the frontend and pass it back in POST /chat/session/end.",
+        "operationId": "get_profile_student_profile_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/student/memory": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get Memory",
+        "description": "Returns cognitive metrics, derived skills, and semantic memory for one subject.\nFor the richer full profile use GET /student/cognitive/{subject}.",
+        "operationId": "get_memory_student_memory_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Update Memory",
+        "description": "Manually add a persistent memory fact for this student.",
+        "operationId": "update_memory_student_memory_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/student/cognitive/{subject}": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get Subject Cognitive Profile",
+        "description": "FULL per-subject cognitive profile for this student.\n\nReturns:\n- 13 raw cognitive metrics (10 core + bloom_level_avg + frustration + confidence)\n- 5 derived high-level cognitive skills\n- Engagement counters (total_chat_turns, total_quizzes, avg_session_duration_min)\n- Aggregated quiz feedback (avg_score, weak_topics, strong_topics, ai_feedback)\n- All active memory facts for this subject\n\nThis is the primary data source for a per-subject student dashboard card.\nThe profile row is auto-created on first access (defaults to 50/100 for all metrics).",
+        "operationId": "get_subject_cognitive_profile_student_cognitive__subject__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/student/cognitive": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get All Subject Profiles",
+        "description": "Returns a summary card for EVERY subject this student has a cognitive\nprofile for (i.e. every subject they have chatted or taken a quiz in).\n\nUse this to render the multi-subject overview / home dashboard.\nSubjects with no profile yet are not included — they appear only after\nthe student's first chat/quiz turn in that subject.",
+        "operationId": "get_all_subject_profiles_student_cognitive_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/student/topics/{subject}": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get Topic Mastery",
+        "description": "Returns per-topic mastery data for this student in a given subject.\n\nEach entry shows mastery_level (0-100), bloom_level_reached (1-6),\nunderstood/confused concepts, spaced-repetition schedule, and confidence.\n\nPass ?chapter_id=<id> to filter to a single chapter.\nUse this to render a topic mastery heatmap or list view.\nTopics never visited are not included (they appear once first visited via chat/quiz).",
+        "operationId": "get_topic_mastery_student_topics__subject__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          },
+          {
+            "name": "chapter_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Chapter Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/student/learning-path/{subject}": {
+      "get": {
+        "tags": [
+          "Student"
+        ],
+        "summary": "Get Learning Path",
+        "description": "Returns a chapter-by-chapter learning path for this student.\n\nEach chapter node contains:\n- Chapter title, number, summary, learning_objectives (from NCERT)\n- Topics with their individual mastery_level + bloom_level_reached\n- Chapter aggregate: avg_mastery, strongest_bloom_level\n- Whether any topic has a spaced-repetition review due today\n\nTopics the student has NEVER visited have mastery_level = null (not 0).\nUse this to render the subject roadmap / curriculum map view.",
+        "operationId": "get_learning_path_student_learning_path__subject__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/curriculum/subjects": {
+      "get": {
+        "tags": [
+          "Curriculum"
+        ],
+        "summary": "List subjects for a class",
+        "description": "Returns all subjects available in the NCERT curriculum for the given `class_num` (6–12).",
+        "operationId": "list_subjects_curriculum_subjects_get",
+        "parameters": [
+          {
+            "name": "class_num",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Class Num"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid class_num"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/curriculum/chapters": {
+      "get": {
+        "tags": [
+          "Curriculum"
+        ],
+        "summary": "List chapters for a subject",
+        "description": "Returns all chapters for the given class and subject name (e.g. `Science`).",
+        "operationId": "list_chapters_curriculum_chapters_get",
+        "parameters": [
+          {
+            "name": "class_num",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Class Num"
+            }
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Subject not found for this class"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/curriculum/topics": {
+      "get": {
+        "tags": [
+          "Curriculum"
+        ],
+        "summary": "List topics for a chapter",
+        "description": "Returns all topics for the given class, subject, and chapter title.",
+        "operationId": "list_topics_curriculum_topics_get",
+        "parameters": [
+          {
+            "name": "class_num",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Class Num"
+            }
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          },
+          {
+            "name": "chapter",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chapter"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Chapter not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quiz/generate": {
+      "post": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Generate Quiz Endpoint",
+        "description": "Generates a personalised quiz (MCQ + theory) for the authenticated student.\nAdapts difficulty from their cognitive profile and memory.",
+        "operationId": "generate_quiz_endpoint_quiz_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateQuizRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateQuizResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/quiz/answer": {
+      "post": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Submit Answer Endpoint",
+        "description": "Submit a student's answer for a single quiz question (ownership-verified).",
+        "operationId": "submit_answer_endpoint_quiz_answer_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitAnswerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/quiz/finish": {
+      "post": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Finish Quiz Endpoint",
+        "description": "Finalises a quiz attempt:\n1. Computes final score from all answered questions\n2. Generates AI feedback paragraph\n3. Updates subject quiz feedback (cumulative record)\n4. Applies cognitive metric impact to student profile + memory\n5. Updates topic mastery + spaced repetition schedule",
+        "operationId": "finish_quiz_endpoint_quiz_finish_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishQuizRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinishQuizResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/quiz/yesterday": {
+      "get": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Yesterday Context Endpoint",
+        "description": "Returns yesterday's session topic for the session-start assignment banner.",
+        "operationId": "yesterday_context_endpoint_quiz_yesterday_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/quiz/history": {
+      "get": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Quiz History Endpoint",
+        "description": "Returns the authenticated student's past quiz attempt summaries.",
+        "operationId": "quiz_history_endpoint_quiz_history_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quiz/feedback/{subject}": {
+      "get": {
+        "tags": [
+          "Quiz"
+        ],
+        "summary": "Quiz Feedback Endpoint",
+        "description": "Returns the aggregated quiz feedback record for the authenticated student/subject.",
+        "operationId": "quiz_feedback_endpoint_quiz_feedback__subject__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubjectQuizFeedbackOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/ingest": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Ingest a PDF chapter into the curriculum database",
+        "description": "Uploads and processes a textbook PDF chapter. The pipeline uses PaddleX layout analysis + Tesseract OCR, then calls the Azure OpenAI LLM to structure content into topics, subtopics, and content blocks with enriched summaries. Embeddings are computed and stored in pgvector. **This is a `multipart/form-data` request** — send as a form, not JSON. Requires `X-Admin-Key` header.",
+        "operationId": "ingest_pdf_admin_ingest_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_pdf_admin_ingest_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid X-Admin-Key"
+          },
+          "404": {
+            "description": "PDF file not found at given path"
+          },
+          "422": {
+            "description": "PDF structuring or validation error"
+          },
+          "500": {
+            "description": "Ingestion pipeline error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/admin/ingestion-log": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List recent ingestion log entries",
+        "description": "Returns ingestion log rows, newest first. Filter by `book_natural_key` and/or `status` (`pending`, `success`, `failed`). Default limit is 50. Requires `X-Admin-Key` header.",
+        "operationId": "get_ingestion_log_admin_ingestion_log_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "book_natural_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Book Natural Key"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IngestLogResponse"
+                  },
+                  "title": "Response Get Ingestion Log Admin Ingestion Log Get"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid X-Admin-Key"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/spaces": {
+      "get": {
+        "tags": [
+          "Study Spaces"
+        ],
+        "summary": "List study spaces",
+        "description": "Returns all active (non-archived) study spaces for the authenticated student. Filter by `?subject=Science` to only show spaces for a specific subject.",
+        "operationId": "list_spaces_spaces_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Study Spaces"
+        ],
+        "summary": "Create a study space",
+        "description": "Creates a new named study space. Supply either `subject_id` (integer) or `subject` (string name). Optionally add `custom_instructions` to tune the tutor's style for this space.",
+        "operationId": "create_space_spaces_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpaceCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "422": {
+            "description": "Validation error (title too long or missing)"
+          }
+        }
+      }
+    },
+    "/spaces/{space_id}": {
+      "patch": {
+        "tags": [
+          "Study Spaces"
+        ],
+        "summary": "Update a study space",
+        "description": "Updates the title, custom instructions, or archived status of a study space.",
+        "operationId": "update_space_spaces__space_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "space_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Space Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpaceUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Space not found or belongs to another user"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Study Spaces"
+        ],
+        "summary": "Delete (archive) a study space",
+        "description": "Soft-deletes the study space by setting `is_archived=True`. The space is hidden from listings but not removed from the database.",
+        "operationId": "delete_space_spaces__space_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "space_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Space Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "404": {
+            "description": "Space not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/attachments/upload": {
+      "post": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Upload Attachment",
+        "description": "Upload an attachment (image or PDF) for curriculum inquiry.\nProcesses images with Multimodal Vision (transcribing text, math, and diagrams)\nand returns metadata ready to attach to ChatRequest.",
+        "operationId": "upload_attachment_attachments_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_attachment_attachments_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/sync/broadcast": {
+      "post": {
+        "tags": [
+          "RealTime Sync"
+        ],
+        "summary": "Broadcast a sync event to other devices",
+        "description": "Manually triggers a real-time event broadcast to all other connected devices of the authenticated student. Common event names: `space_switch`, `typing`, `presence`. The `data` dict is forwarded as-is.",
+        "operationId": "broadcast_event_endpoint_sync_broadcast_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/sync/status": {
+      "get": {
+        "tags": [
+          "RealTime Sync"
+        ],
+        "summary": "Get connected devices count",
+        "description": "Returns how many devices/tabs the authenticated student currently has connected via WebSocket.",
+        "operationId": "sync_status_sync_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Token missing or invalid"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "description": "Returns `{status: ok}` when the API is running. No authentication required. Use this endpoint for uptime monitoring.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AttachmentResponse": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "content_type": {
+            "type": "string",
+            "title": "Content Type"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "extracted_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extracted Text",
+            "default": ""
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "default": ""
+          },
+          "topic_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Hint",
+            "default": ""
+          },
+          "base64_thumbnail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base64 Thumbnail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "filename",
+          "content_type",
+          "url"
+        ],
+        "title": "AttachmentResponse"
+      },
+      "AuthResponse": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id",
+            "examples": [
+              "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "examples": [
+              "priya_sharma"
+            ]
+          },
+          "class_num": {
+            "type": "integer",
+            "title": "Class Num",
+            "examples": [
+              10
+            ]
+          },
+          "access_token": {
+            "type": "string",
+            "title": "Access Token",
+            "examples": [
+              "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+            ]
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token",
+            "examples": [
+              "dGhpcyBpcyBhIHNhbXBsZSByZWZyZXNoIHRva2Vu"
+            ]
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer",
+            "examples": [
+              "bearer"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "",
+            "examples": [
+              "Login successful"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "title": "Role",
+            "default": "student",
+            "examples": [
+              "student"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "username",
+          "class_num",
+          "access_token"
+        ],
+        "title": "AuthResponse"
+      },
+      "Body_ingest_pdf_admin_ingest_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "board_name": {
+            "type": "string",
+            "title": "Board Name"
+          },
+          "class_num": {
+            "type": "integer",
+            "title": "Class Num"
+          },
+          "subject_name": {
+            "type": "string",
+            "title": "Subject Name"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "book_natural_key": {
+            "type": "string",
+            "title": "Book Natural Key"
+          },
+          "chapter_title": {
+            "type": "string",
+            "title": "Chapter Title"
+          },
+          "chapter_number": {
+            "type": "integer",
+            "title": "Chapter Number"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "board_name",
+          "class_num",
+          "subject_name",
+          "book_title",
+          "book_natural_key",
+          "chapter_title",
+          "chapter_number"
+        ],
+        "title": "Body_ingest_pdf_admin_ingest_post"
+      },
+      "Body_upload_attachment_attachments_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_attachment_attachments_upload_post"
+      },
+      "BroadcastEventRequest": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "title": "Event"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event",
+          "data"
+        ],
+        "title": "BroadcastEventRequest"
+      },
+      "ChatRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "description": "Leave null to start a new conversation. Subsequent turns must send the UUID returned in the first response.",
+            "examples": [
+              "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            ]
+          },
+          "parent_message_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Message Id",
+            "description": "Used for branching/regeneration; omit for normal turns."
+          },
+          "study_space_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Study Space Id",
+            "description": "Attach this chat to a study space."
+          },
+          "incognito": {
+            "type": "boolean",
+            "title": "Incognito",
+            "description": "If true, this turn is not saved to history.",
+            "default": false
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Question",
+            "description": "The student's question in natural language.",
+            "examples": [
+              "Explain Newton's second law of motion with an example."
+            ]
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id",
+            "description": "Numeric subject ID. Preferred over subject string."
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject",
+            "description": "Subject name, e.g. 'Science'. Used if subject_id is not given.",
+            "examples": [
+              "Science"
+            ]
+          },
+          "tutor_mode": {
+            "type": "string",
+            "title": "Tutor Mode",
+            "description": "'standard' = direct answer | 'deep' = Socratic diagnostic",
+            "default": "standard",
+            "examples": [
+              "standard"
+            ]
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments",
+            "description": "List of attachment metadata dicts returned by POST /attachments/upload."
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key",
+            "description": "Optional client-generated key to prevent duplicate requests."
+          }
+        },
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "ChatRequest"
+      },
+      "ChatResponse": {
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Conversation Id"
+          },
+          "message_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Message Id"
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInfo"
+            },
+            "type": "array",
+            "title": "Sources",
+            "default": []
+          },
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Attachments",
+            "default": []
+          },
+          "routed_chapter": {
+            "type": "string",
+            "title": "Routed Chapter",
+            "default": ""
+          },
+          "routed_topic": {
+            "type": "string",
+            "title": "Routed Topic",
+            "default": ""
+          },
+          "question_type": {
+            "type": "string",
+            "title": "Question Type",
+            "default": "conversational"
+          },
+          "cognitive_skills": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Cognitive Skills",
+            "default": {}
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Metrics",
+            "default": {}
+          },
+          "metrics_adjustments": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics Adjustments",
+            "default": {}
+          },
+          "conversation_length": {
+            "type": "integer",
+            "title": "Conversation Length",
+            "default": 0
+          },
+          "pending_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pending Tasks",
+            "default": []
+          },
+          "quiz_suggestion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuizSuggestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "yesterday_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/YesterdayContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_new_conversation": {
+            "type": "boolean",
+            "title": "Is New Conversation",
+            "default": false
+          },
+          "context": {
+            "type": "string",
+            "title": "Context",
+            "default": ""
+          },
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Chunks",
+            "default": []
+          },
+          "prompt_messages": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Prompt Messages",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "conversation_id",
+          "message_id",
+          "answer"
+        ],
+        "title": "ChatResponse"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "rating": {
+            "type": "integer",
+            "title": "Rating"
+          },
+          "feedback_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "rating"
+        ],
+        "title": "FeedbackRequest"
+      },
+      "FinishQuizRequest": {
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_id"
+        ],
+        "title": "FinishQuizRequest"
+      },
+      "FinishQuizResponse": {
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "correct": {
+            "type": "integer",
+            "title": "Correct"
+          },
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "ai_feedback": {
+            "type": "string",
+            "title": "Ai Feedback",
+            "default": ""
+          },
+          "metrics_impact": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics Impact"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_id",
+          "score",
+          "total",
+          "correct",
+          "passed",
+          "topic",
+          "subject"
+        ],
+        "title": "FinishQuizResponse"
+      },
+      "GenerateQuizRequest": {
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic",
+            "default": ""
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "default": ""
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "description": "mid_concept | yesterday | manual",
+            "default": "manual"
+          },
+          "num_questions": {
+            "type": "integer",
+            "maximum": 15.0,
+            "minimum": 3.0,
+            "title": "Num Questions",
+            "default": 7
+          }
+        },
+        "type": "object",
+        "title": "GenerateQuizRequest"
+      },
+      "GenerateQuizResponse": {
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/QuizQuestionOut"
+            },
+            "type": "array",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_id",
+          "subject",
+          "topic",
+          "source",
+          "questions"
+        ],
+        "title": "GenerateQuizResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "version"
+        ],
+        "title": "HealthResponse"
+      },
+      "IngestLogResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "book_id": {
+            "type": "integer",
+            "title": "Book Id"
+          },
+          "book_natural_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Natural Key"
+          },
+          "chapter_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Number"
+          },
+          "pdf_hash": {
+            "type": "string",
+            "title": "Pdf Hash"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "ingestion_confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingestion Confidence"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ingested At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "book_id",
+          "pdf_hash",
+          "status",
+          "ingested_at"
+        ],
+        "title": "IngestLogResponse"
+      },
+      "IngestResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "sections_ingested": {
+            "type": "integer",
+            "title": "Sections Ingested",
+            "default": 0
+          },
+          "blocks_stored": {
+            "type": "integer",
+            "title": "Blocks Stored",
+            "default": 0
+          },
+          "chapter_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Id"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings",
+            "default": []
+          },
+          "ingestion_confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingestion Confidence"
+          },
+          "coverage": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Coverage",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "IngestResponse"
+      },
+      "LoginRequest": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "examples": [
+              "priya_sharma"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "title": "Password",
+            "examples": [
+              "SecurePass123"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest"
+      },
+      "QuizQuestionOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "q_index": {
+            "type": "integer",
+            "title": "Q Index"
+          },
+          "q_type": {
+            "type": "string",
+            "title": "Q Type"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "q_index",
+          "q_type",
+          "question"
+        ],
+        "title": "QuizQuestionOut",
+        "description": "A single question sent to the frontend — correct answer hidden."
+      },
+      "QuizSuggestion": {
+        "properties": {
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "num_questions": {
+            "type": "integer",
+            "title": "Num Questions",
+            "default": 7
+          }
+        },
+        "type": "object",
+        "required": [
+          "topic",
+          "subject"
+        ],
+        "title": "QuizSuggestion",
+        "description": "Injected into ChatResponse when AI detects a concept is fully explained."
+      },
+      "RefreshRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "title": "RefreshRequest"
+      },
+      "RegisterRequest": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 3,
+            "title": "Username",
+            "examples": [
+              "priya_sharma"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Email",
+            "examples": [
+              "priya@example.com"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 6,
+            "title": "Password",
+            "examples": [
+              "SecurePass123"
+            ]
+          },
+          "class_num": {
+            "type": "integer",
+            "maximum": 12.0,
+            "minimum": 6.0,
+            "title": "Class Num",
+            "examples": [
+              10
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "email",
+          "password",
+          "class_num"
+        ],
+        "title": "RegisterRequest"
+      },
+      "SessionEndRequest": {
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "title": "Conversation Id"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "conversation_id"
+        ],
+        "title": "SessionEndRequest"
+      },
+      "SourceInfo": {
+        "properties": {
+          "chapter": {
+            "type": "string",
+            "title": "Chapter"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chapter",
+          "topic",
+          "score"
+        ],
+        "title": "SourceInfo"
+      },
+      "SpaceCreateRequest": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "custom_instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Custom Instructions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "SpaceCreateRequest"
+      },
+      "SpaceUpdateRequest": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "custom_instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Custom Instructions"
+          },
+          "is_archived": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Archived"
+          }
+        },
+        "type": "object",
+        "title": "SpaceUpdateRequest"
+      },
+      "SubjectQuizFeedbackOut": {
+        "properties": {
+          "total_attempts": {
+            "type": "integer",
+            "title": "Total Attempts",
+            "default": 0
+          },
+          "total_questions": {
+            "type": "integer",
+            "title": "Total Questions",
+            "default": 0
+          },
+          "total_correct": {
+            "type": "integer",
+            "title": "Total Correct",
+            "default": 0
+          },
+          "avg_score": {
+            "type": "number",
+            "title": "Avg Score",
+            "default": 0.0
+          },
+          "mcq_accuracy": {
+            "type": "number",
+            "title": "Mcq Accuracy",
+            "default": 0.0
+          },
+          "theory_accuracy": {
+            "type": "number",
+            "title": "Theory Accuracy",
+            "default": 0.0
+          },
+          "weak_topics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Weak Topics"
+          },
+          "strong_topics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Strong Topics"
+          },
+          "ai_feedback": {
+            "type": "string",
+            "title": "Ai Feedback",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "SubjectQuizFeedbackOut"
+      },
+      "SubmitAnswerRequest": {
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "question_id": {
+            "type": "integer",
+            "title": "Question Id"
+          },
+          "student_answer": {
+            "type": "string",
+            "title": "Student Answer",
+            "default": ""
+          },
+          "student_answer_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Student Answer Index"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_id",
+          "question_id"
+        ],
+        "title": "SubmitAnswerRequest"
+      },
+      "SubmitAnswerResponse": {
+        "properties": {
+          "is_correct": {
+            "type": "boolean",
+            "title": "Is Correct"
+          },
+          "correct_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correct Index"
+          },
+          "correct_answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correct Answer"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "is_correct"
+        ],
+        "title": "SubmitAnswerResponse"
+      },
+      "TitleUpdateRequest": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "TitleUpdateRequest"
+      },
+      "UpdateMemoryRequest": {
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "fact": {
+            "type": "string",
+            "title": "Fact"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fact"
+        ],
+        "title": "UpdateMemoryRequest"
+      },
+      "UpdateMetricsRequest": {
+        "properties": {
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Metrics"
+          }
+        },
+        "type": "object",
+        "required": [
+          "metrics"
+        ],
+        "title": "UpdateMetricsRequest"
+      },
+      "UserSummary": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id",
+            "examples": [
+              "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "examples": [
+              "priya_sharma"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "title": "Email",
+            "examples": [
+              "priya@example.com"
+            ]
+          },
+          "class_num": {
+            "type": "integer",
+            "title": "Class Num",
+            "examples": [
+              10
+            ]
+          },
+          "role": {
+            "type": "string",
+            "title": "Role",
+            "examples": [
+              "student"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "username",
+          "email",
+          "class_num",
+          "role"
+        ],
+        "title": "UserSummary"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "YesterdayContext": {
+        "properties": {
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "session_date": {
+            "type": "string",
+            "title": "Session Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "subject",
+          "topic",
+          "session_date"
+        ],
+        "title": "YesterdayContext",
+        "description": "Injected into ChatResponse on session start when yesterday's session exists."
+      },
+      "_ErrorDetail": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "_ErrorDetail"
+      },
+      "_FeedbackResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "rating": {
+            "type": "integer",
+            "title": "Rating"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "rating"
+        ],
+        "title": "_FeedbackResponse"
+      },
+      "_SessionEndResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "_SessionEndResponse"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Key"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Register, login, token refresh, logout, and current-user identity. All protected routes require `Authorization: Bearer <access_token>`."
+    },
+    {
+      "name": "Chat",
+      "description": "Core tutoring endpoints. Send a question; receive a structured answer (JSON) or a real-time SSE stream of tokens. Rate-limited to 30 req/min."
+    },
+    {
+      "name": "Sessions",
+      "description": "Conversation history management: list past sessions, fetch full message history, rename sessions, generate AI titles, branch activation, and sharing."
+    },
+    {
+      "name": "Student",
+      "description": "Student cognitive profile, per-subject metrics, topic mastery heatmap, and personalised learning-path view."
+    },
+    {
+      "name": "Quiz",
+      "description": "AI-generated adaptive quizzes. Generate → answer question-by-question → finish to get score + AI feedback + cognitive profile update."
+    },
+    {
+      "name": "Curriculum",
+      "description": "Public curriculum browse endpoints to populate dropdowns (subjects, chapters, topics). No authentication required."
+    },
+    {
+      "name": "Study Spaces",
+      "description": "Named per-subject workspaces that group conversations with custom tutor instructions."
+    },
+    {
+      "name": "Attachments",
+      "description": "Upload images/PDFs. The server runs multimodal vision analysis and returns extracted text + a topic hint ready for use in `POST /chat`."
+    },
+    {
+      "name": "RealTime Sync",
+      "description": "WebSocket + HTTP endpoints for cross-device state synchronisation (quiz results, study-space changes broadcast to all connected tabs)."
+    },
+    {
+      "name": "Admin",
+      "description": "PDF ingestion and ingestion-log inspection. Protected by `X-Admin-Key` header — **not** a JWT. Admin-only."
+    },
+    {
+      "name": "System",
+      "description": "Health-check endpoint. No authentication required."
+    }
+  ]
+}

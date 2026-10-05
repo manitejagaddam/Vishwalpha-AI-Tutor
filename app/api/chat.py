@@ -35,10 +35,42 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
+# ── Shared response models (documentation only) ────────────────────────────────
+from pydantic import BaseModel as _BaseModel
+from typing import Any as _Any
+
+class _ErrorDetail(_BaseModel):
+    detail: str
+
+class _FeedbackResponse(_BaseModel):
+    status: str
+    rating: int
+
+class _SessionEndResponse(_BaseModel):
+    status: str
+    message: str
+
+_AUTH_ERROR = {"model": _ErrorDetail, "description": "Token missing, invalid, or expired"}
+_RATE_ERROR = {"description": "Rate limit exceeded (30 req/min)"}
+
 
 # ── Standard (blocking) chat ───────────────────────────────────────────────────
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post(
+    "/chat",
+    response_model=ChatResponse,
+    summary="Send a question (blocking JSON response)",
+    description=(
+        "Sends a student question to the AI tutor and waits for the complete answer. "
+        "The response includes the full answer text, source citations, topic routing info, "
+        "and updated cognitive skill metrics. Use `/chat/stream` for real-time token streaming."
+    ),
+    responses={
+        401: _AUTH_ERROR,
+        429: _RATE_ERROR,
+        500: {"description": "LLM or retrieval error"},
+    },
+)
 @limiter.limit("30/minute")
 async def chat_endpoint(
     payload: ChatRequest,
@@ -63,7 +95,30 @@ async def chat_endpoint(
 
 # ── Streaming (SSE) chat ───────────────────────────────────────────────────────
 
-@router.post("/chat/stream")
+@router.post(
+    "/chat/stream",
+    summary="Send a question (SSE streaming response)",
+    description=(
+        "Sends a student question to the AI tutor and streams the answer in real-time "
+        "via Server-Sent Events (`text/event-stream`).\n\n"
+        "**SSE Event format** (one JSON object per `data:` line):\n"
+        "- `{\"type\": \"meta\", \"session_id\": \"...\", \"is_session_start\": true}` — first event\n"
+        "- `{\"type\": \"token\", \"content\": \"He\"}` — one per token chunk\n"
+        "- `{\"type\": \"done\", \"sources\": [...], \"metrics\": {...}}` — final event\n"
+        "- `{\"type\": \"error\", \"detail\": \"...\"}` — only on failure\n\n"
+        "The frontend should read the stream with `EventSource` or `fetch` + `ReadableStream`, "
+        "appending `token.content` to the visible message as chunks arrive."
+    ),
+    responses={
+        401: _AUTH_ERROR,
+        429: _RATE_ERROR,
+        500: {"description": "LLM or retrieval error"},
+        200: {
+            "description": "SSE stream (text/event-stream)",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        },
+    },
+)
 @limiter.limit("30/minute")
 async def chat_stream_endpoint(
     payload: ChatRequest,
@@ -110,7 +165,21 @@ class SessionEndRequest(BaseModel):
     conversation_id: str
     subject_id: int | None = None
 
-@router.post("/chat/session/end")
+@router.post(
+    "/chat/session/end",
+    response_model=_SessionEndResponse,
+    summary="End a chat session (triggers deep sync)",
+    description=(
+        "Explicitly ends a chat session and queues the Deep Session Sync in the background. "
+        "The sync extracts student memory, recalculates weak topics, and updates learning preferences. "
+        "**Call this when the user navigates away from the chat page or closes the app.** "
+        "Returns immediately without blocking."
+    ),
+    responses={
+        401: _AUTH_ERROR,
+        429: {"description": "Rate limit exceeded (10 req/min)"},
+    },
+)
 @limiter.limit("10/minute")
 async def chat_session_end_endpoint(
     payload: SessionEndRequest,
@@ -166,7 +235,20 @@ class FeedbackRequest(BaseModel):
     rating: int  # 1 for thumbs up, -1 for thumbs down, 0 for neutral/reset
     feedback_text: str | None = None
 
-@router.post("/chat/feedback")
+@router.post(
+    "/chat/feedback",
+    response_model=_FeedbackResponse,
+    summary="Rate a tutor message (thumbs up / down)",
+    description=(
+        "Saves the student's rating on a specific tutor message. "
+        "Use `rating=1` for thumbs-up, `rating=-1` for thumbs-down, `rating=0` to reset. "
+        "Optionally include a `feedback_text` reason."
+    ),
+    responses={
+        401: _AUTH_ERROR,
+        400: {"description": "Invalid message_id UUID format"},
+    },
+)
 async def chat_feedback_endpoint(
     request: FeedbackRequest,
     user: User = Depends(get_current_user),

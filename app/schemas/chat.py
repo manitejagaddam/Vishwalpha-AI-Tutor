@@ -4,16 +4,27 @@ from uuid import UUID
 from app.schemas.legacy import SourceInfo, QuizSuggestion, YesterdayContext
 
 class ChatRequest(BaseModel):
-    conversation_id: Optional[UUID] = Field(None, alias="session_id")
-    parent_message_id: Optional[UUID] = None
-    study_space_id: Optional[UUID] = None
-    incognito: bool = False
-    question: str = Field(..., min_length=1, max_length=4000)
-    subject_id: Optional[int] = None
-    subject: Optional[str] = None  # Frontend sends string "Science"
-    tutor_mode: str = "standard"
-    attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
-    idempotency_key: Optional[str] = None
+    conversation_id: Optional[UUID] = Field(
+        None,
+        alias="session_id",
+        description="Leave null to start a new conversation. Subsequent turns must send the UUID returned in the first response.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
+    parent_message_id: Optional[UUID] = Field(None, description="Used for branching/regeneration; omit for normal turns.")
+    study_space_id: Optional[UUID] = Field(None, description="Attach this chat to a study space.")
+    incognito: bool = Field(default=False, description="If true, this turn is not saved to history.")
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="The student's question in natural language.",
+        examples=["Explain Newton's second law of motion with an example."],
+    )
+    subject_id: Optional[int] = Field(None, description="Numeric subject ID. Preferred over subject string.")
+    subject: Optional[str] = Field(None, description="Subject name, e.g. 'Science'. Used if subject_id is not given.", examples=["Science"])
+    tutor_mode: str = Field(default="standard", description="'standard' = direct answer | 'deep' = Socratic diagnostic", examples=["standard"])
+    attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="List of attachment metadata dicts returned by POST /attachments/upload.")
+    idempotency_key: Optional[str] = Field(None, description="Optional client-generated key to prevent duplicate requests.")
     
     @field_validator("conversation_id", "parent_message_id", "study_space_id", mode="before")
     def empty_or_invalid_uuid_to_none(cls, v):

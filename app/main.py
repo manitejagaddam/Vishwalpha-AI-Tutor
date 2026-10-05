@@ -7,8 +7,10 @@ import logging
 from contextlib import asynccontextmanager
 import time
 import asyncio
+from typing import Literal
 
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,12 +55,103 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down API...")
 
 
+# ── OpenAPI tag metadata ──────────────────────────────────────────────────────
+openapi_tags = [
+    {
+        "name": "Auth",
+        "description": "Register, login, token refresh, logout, and current-user identity. "
+                       "All protected routes require `Authorization: Bearer <access_token>`.",
+    },
+    {
+        "name": "Chat",
+        "description": "Core tutoring endpoints. Send a question; receive a structured answer "
+                       "(JSON) or a real-time SSE stream of tokens. Rate-limited to 30 req/min.",
+    },
+    {
+        "name": "Sessions",
+        "description": "Conversation history management: list past sessions, fetch full message "
+                       "history, rename sessions, generate AI titles, branch activation, and sharing.",
+    },
+    {
+        "name": "Student",
+        "description": "Student cognitive profile, per-subject metrics, topic mastery heatmap, "
+                       "and personalised learning-path view.",
+    },
+    {
+        "name": "Quiz",
+        "description": "AI-generated adaptive quizzes. Generate → answer question-by-question → "
+                       "finish to get score + AI feedback + cognitive profile update.",
+    },
+    {
+        "name": "Curriculum",
+        "description": "Public curriculum browse endpoints to populate dropdowns "
+                       "(subjects, chapters, topics). No authentication required.",
+    },
+    {
+        "name": "Study Spaces",
+        "description": "Named per-subject workspaces that group conversations with "
+                       "custom tutor instructions.",
+    },
+    {
+        "name": "Attachments",
+        "description": "Upload images/PDFs. The server runs multimodal vision analysis "
+                       "and returns extracted text + a topic hint ready for use in `POST /chat`.",
+    },
+    {
+        "name": "RealTime Sync",
+        "description": "WebSocket + HTTP endpoints for cross-device state synchronisation "
+                       "(quiz results, study-space changes broadcast to all connected tabs).",
+    },
+    {
+        "name": "Admin",
+        "description": "PDF ingestion and ingestion-log inspection. Protected by "
+                       "`X-Admin-Key` header — **not** a JWT. Admin-only.",
+    },
+    {
+        "name": "System",
+        "description": "Health-check endpoint. No authentication required.",
+    },
+]
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="VishwAlpha AI Tutor",
-        description="Personalised NCERT curriculum tutor powered by RAG + Azure OpenAI (GPT-4.1-mini, text-embedding-3-small)",
+        title="VishwAlpha AI Tutor API",
+        description=(
+            "# VishwAlpha AI Tutor\n\n"
+            "Personalised NCERT curriculum tutor for Indian school students (Classes 6–12). "
+            "Students ask questions via chat; the system retrieves relevant textbook context "
+            "via pgvector RAG and generates pedagogically structured answers using Azure OpenAI.\n\n"
+            "## Authentication\n\n"
+            "All protected endpoints require a JWT Bearer token in the `Authorization` header:\n\n"
+            "```\nAuthorization: Bearer <access_token>\n```\n\n"
+            "Obtain a token from `POST /auth/login` or `POST /auth/register`. "
+            "Tokens expire after **7 days** by default.\n\n"
+            "Admin-only routes (`/admin/*`) use a separate static `X-Admin-Key` header instead of JWT.\n\n"
+            "## Rate Limits\n\n"
+            "| Scope | Limit |\n"
+            "|-------|-------|\n"
+            "| Chat endpoints | 30 req / minute |\n"
+            "| Session end | 10 req / minute |\n"
+            "| All other reads | 120 req / minute |\n\n"
+            "## SSE Streaming\n\n"
+            "`POST /chat/stream` returns `text/event-stream`. Each line is "
+            "`data: <json>\\n\\n`. Event types: `meta`, `token`, `done`, `error`."
+        ),
         version="2.0.0",
+        openapi_tags=openapi_tags,
+        contact={
+            "name": "VishwAlpha Engineering",
+            "email": "dev@vishwalpha.app",
+        },
+        license_info={
+            "name": "Proprietary",
+        },
+        servers=[
+            {"url": "http://localhost:8000", "description": "Local development"},
+            {"url": "https://vishwalpha-ai-tutor-production.up.railway.app", "description": "Production (Railway)"},
+        ],
         lifespan=lifespan,
     )
 
@@ -117,9 +210,20 @@ def create_app() -> FastAPI:
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-    @app.get("/health", tags=["System"])
+    class HealthResponse(BaseModel):
+        status: Literal["ok"]
+        version: str
+
+    @app.get(
+        "/health",
+        tags=["System"],
+        summary="Health check",
+        description="Returns `{status: ok}` when the API is running. No authentication required. "
+                    "Use this endpoint for uptime monitoring.",
+        response_model=HealthResponse,
+    )
     def health_check():
-        return {"status": "ok", "version": "2.0.0"}
+        return HealthResponse(status="ok", version="2.0.0")
 
     return app
 
