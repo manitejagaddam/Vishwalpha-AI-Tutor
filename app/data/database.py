@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 # ── Fix Supabase/Heroku postgres:// → postgresql:// ───────────────────────────
 _db_url = settings.DATABASE_URL
 if _db_url.startswith("postgres://"):
-    _db_url = _db_url.replace("postgres://", "postgresql://", 1)
+    _db_url = _db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif _db_url.startswith("postgresql://") and not _db_url.startswith("postgresql+"):
+    _db_url = _db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 engine = create_engine(
     _db_url,
