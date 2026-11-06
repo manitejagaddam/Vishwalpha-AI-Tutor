@@ -32,12 +32,15 @@ from app.prompts import (
     OPEN_CURRICULUM_PROMPT,
     SESSION_INSIGHT_PROMPT,
     SESSION_REMARK_PROMPT,
+    V4_DIRECT_TUTOR_PROMPT,
+    get_grade_boundary_instructions,
 )
 from app.services.ab_testing import get_active_prompt
 
 logger = logging.getLogger(__name__)
 
-# Re-export prompts for legacy import paths used in chat_orchestrator.py streaming path
+# Re-export prompts for legacy & V4 import paths used in chat_orchestrator.py
+_V4_DIRECT_TUTOR_PROMPT = V4_DIRECT_TUTOR_PROMPT
 _CURRICULUM_PROMPT      = CURRICULUM_PROMPT
 _OPEN_CURRICULUM_PROMPT = OPEN_CURRICULUM_PROMPT
 _CONVERSATIONAL_PROMPT  = CONVERSATIONAL_PROMPT
@@ -149,6 +152,8 @@ class TutorLLM:
         student_progress: str = "",
         user_id: str | None = None,
         conversation_id: str | None = None,
+        class_num: int | None = None,
+        attachment_context: str = "",
     ) -> tuple[str, list[dict]]:
         """
         Generates a tutor response.
@@ -157,7 +162,7 @@ class TutorLLM:
             mode:                 "curriculum" | "open_curriculum" | "conversational"
             question:             The student's question
             history:              List of Msg objects (recent conversation)
-            context:              Retrieved RAG context (curriculum mode only)
+            context:              Retrieved RAG context (legacy/optional)
             student_memory:       Persistent memory facts about the student
             learning_preferences: Dict of learning style preferences
             weak_topics:          Formatted string of weak topics
@@ -165,12 +170,14 @@ class TutorLLM:
             subject_context:      String detailing class, subject, and syllabus
             user_id:              For A/B experiment assignment
             conversation_id:      For logging (unused currently)
+            class_num:            Student grade level (6-12) for pedagogical boundaries
+            attachment_context:   Extracted text / vision notes from attachments
 
         Returns:
             (answer_text, prompt_messages_list)
         """
         system_map = {
-            "curriculum":      CURRICULUM_PROMPT,
+            "curriculum":      V4_DIRECT_TUTOR_PROMPT,
             "open_curriculum": OPEN_CURRICULUM_PROMPT,
             "conversational":  CONVERSATIONAL_PROMPT,
         }
@@ -178,38 +185,36 @@ class TutorLLM:
         teaching_style = _build_teaching_style(learning_preferences or {})
         weak_section   = _build_weak_topics_section(weak_topics)
         review_section = _build_review_section(review_topics or [])
+        grade_boundaries = get_grade_boundary_instructions(class_num)
+        att_section = f"\n{attachment_context}" if attachment_context else ""
 
         # A/B Testing — override system template if an active experiment exists
         ab_template, _ab_exp_id = None, None
         if user_id:
             ab_template, _ab_exp_id = get_active_prompt(f"{mode}_prompt", str(user_id))
 
-        system_template = ab_template or system_map.get(mode, OPEN_CURRICULUM_PROMPT)
+        system_template = ab_template or system_map.get(mode, V4_DIRECT_TUTOR_PROMPT)
+
+        format_kwargs = dict(
+            context=context or "(no additional context)",
+            student_memory=student_memory or "(no memory yet)",
+            teaching_style=teaching_style,
+            weak_topics_section=weak_section,
+            review_section=review_section,
+            subject_context=subject_context,
+            student_progress=student_progress or "(No progress data yet)",
+            grade_boundaries=grade_boundaries,
+            attachment_section=att_section,
+        )
 
         try:
-            system_content = system_template.format(
-                context=context or "(no additional context)",
-                student_memory=student_memory or "(no memory yet)",
-                teaching_style=teaching_style,
-                weak_topics_section=weak_section,
-                review_section=review_section,
-                subject_context=subject_context,
-                student_progress=student_progress or "(No progress data yet)",
-            )
+            system_content = system_template.format(**format_kwargs)
         except KeyError as ke:
             logger.warning(
-                f"[TutorLLM] A/B prompt template missing placeholder {ke} — falling back to default."
+                f"[TutorLLM] Prompt template missing placeholder {ke} — formatting with fallback defaults."
             )
-            fallback_template = system_map.get(mode, OPEN_CURRICULUM_PROMPT)
-            system_content = fallback_template.format(
-                context=context or "(no additional context)",
-                student_memory=student_memory or "(no memory yet)",
-                teaching_style=teaching_style,
-                weak_topics_section=weak_section,
-                review_section=review_section,
-                subject_context=subject_context,
-                student_progress=student_progress or "(No progress data yet)",
-            )
+            fallback_template = system_map.get(mode, V4_DIRECT_TUTOR_PROMPT)
+            system_content = fallback_template.format(**format_kwargs)
 
         temp, max_tok = _mode_config(mode)
 

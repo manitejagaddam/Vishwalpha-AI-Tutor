@@ -278,6 +278,77 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
         return None
 
 
+def _fast_resolve_topic_from_syllabus(
+    question: str,
+    subject_id: int | None,
+    class_num: int | None,
+    conv_last_topic: str | None = None,
+) -> tuple[str, str, int | None]:
+    """
+    RAG-Free, zero-latency topic matcher (V4).
+    Checks student question against cached chapters and topics in the subject's syllabus
+    using exact substring and high-signal keyword token overlap.
+    Returns: (routed_chapter, routed_topic, topic_id)
+    """
+    if not subject_id:
+        return ("", conv_last_topic or "", None)
+
+    q_lower = question.lower()
+    q_words = set(re.findall(r"\w+", q_lower))
+    stop_words = {"and", "the", "of", "in", "a", "an", "for", "to", "with", "on", "what", "is", "how", "can", "you", "explain", "tell", "me", "about"}
+
+    try:
+        from app.data.models.content import Topic, Chapter, Book
+        with managed_session() as db:
+            topics = (
+                db.query(Topic.id, Topic.title, Chapter.title.label("chapter_title"))
+                .join(Chapter, Topic.chapter_id == Chapter.id)
+                .join(Book, Chapter.book_id == Book.id)
+                .filter(Book.subject_id == subject_id)
+                .all()
+            )
+            # 1. Direct substring match
+            for tid, t_title, ch_title in topics:
+                if len(t_title) > 3 and t_title.lower() in q_lower:
+                    return (ch_title, t_title, tid)
+
+            # 2. Keyword token overlap match
+            best_match = None
+            best_score = 0.0
+            for tid, t_title, ch_title in topics:
+                t_words = set(re.findall(r"\w+", t_title.lower())) - stop_words
+                if not t_words:
+                    continue
+                common = t_words & q_words
+                if len(common) >= 2 or (len(t_words) == 1 and len(common) == 1):
+                    score = len(common) / len(t_words)
+                    if score > best_score:
+                        best_score = score
+                        best_match = (ch_title, t_title, tid)
+
+            if best_match:
+                return best_match
+
+            # 3. Chapter title keyword match
+            for tid, t_title, ch_title in topics:
+                ch_words = set(re.findall(r"\w+", ch_title.lower())) - stop_words
+                if not ch_words:
+                    continue
+                common = ch_words & q_words
+                if len(common) >= 2 or (len(ch_words) == 1 and len(common) == 1):
+                    return (ch_title, t_title, tid)
+
+            # 4. Fallback to conversation's last active topic
+            if conv_last_topic:
+                for tid, t_title, ch_title in topics:
+                    if t_title.lower() == conv_last_topic.lower():
+                        return (ch_title, t_title, tid)
+    except Exception as e:
+        logger.warning(f"[V4] Fast topic resolve failed: {e}")
+
+    return ("", conv_last_topic or "", None)
+
+
 class Msg:
     def __init__(self, role, content):
         self.role = role
@@ -601,8 +672,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     except Exception as e:
         logger.warning(f"Weak topics fetch failed: {e}")
 
-    # ── Question classification ───────────────────────────────────────────────
-    llm = _get_llm()
+    # ── Question classification (Zero-Latency Heuristic) ──────────────────────
     referential_triggers = {
         "it", "this", "that", "these", "those", "discussing", "discussed",
         "topic", "topics", "continue", "more", "again", "we are", "what was", "right now",
@@ -613,72 +683,31 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
 
     if is_conversational(request.question) and not request.attachments and not (has_reference and (conv_last_topic or history)):
         question_type = "conversational"
+        generation_mode = "conversational"
     else:
-        question_type = "curriculum" if request.attachments else llm.classify_question(request.question, history)
+        question_type = "curriculum"
+        generation_mode = "curriculum"
 
-    # ── Retrieval (curriculum only) ───────────────────────────────────────────
-    context         = ""
+    # ── Version 4 Core: RAG-Free Direct LLM (Zero Embedding & pgvector Latency) ───
+    # Bypasses VectorRouter and pgvector chunk cascade.
+    # LLM operates with strict grade-adaptive boundaries and subject syllabus context.
+    context = ""
     sources: list[SourceInfo] = []
-    routed_chapter  = ""
-    routed_topic    = ""
-    generation_mode = "conversational"
+    routed_chapter = ""
+    routed_topic = conv_last_topic or ""
     confident_chunks: list[dict] = []
 
-    if question_type == "curriculum":
-        router = _get_router()
-        routing_query = request.question
-        if attachment_query_addon:
-            routing_query = f"{request.question} {attachment_query_addon}".strip()
-        elif has_reference:
-            if conv_last_topic:
-                routing_query = f"{conv_last_topic} {request.question}"
-            elif history:
-                prev_student_msg = next((m.content for m in reversed(history) if m.role == "student"), "")
-                if prev_student_msg:
-                    routing_query = f"{prev_student_msg[:120]} {request.question}"
-
-        # ── Route cache check (Layer 6) ───────────────────────────────────────
-        # Identical topic queries from multiple students → 1 DB hit, N-1 cache hits.
-        route = _sc.get_route(routing_query, class_num, subject_id_resolved)
-        if route:
-            logger.info("[Router] Cache HIT")
-        else:
-            route = router.route_query(
-                routing_query, class_num=class_num, subject_id=subject_id_resolved, board_id=board_id
-            )
-            if route:
-                _sc.set_route(routing_query, class_num, subject_id_resolved, route)
-
-        if route:
-            routed_chapter = route.get("chapter", "")
-            routed_topic   = route.get("topic", "")
-            context, confident_chunks = retrieve_with_confidence(
-                question=routing_query,
-                routing_metadata=route,
-            )
-            if context:
-                generation_mode = "curriculum"
-                seen: set[tuple] = set()
-                for chunk in confident_chunks:
-                    meta = chunk.get("metadata", {})
-                    key = (meta.get("chapter", ""), meta.get("topic", ""))
-                    if key not in seen:
-                        seen.add(key)
-                        sources.append(SourceInfo(
-                            chapter=meta.get("chapter", ""),
-                            topic=meta.get("topic", ""),
-                            score=round(chunk.get("score", 0), 2),
-                        ))
-            else:
-                logger.info("No confident chunks → switching to open_curriculum mode")
-                generation_mode = "open_curriculum"
-        else:
-            logger.info("Router found no route → open_curriculum mode")
-            generation_mode = "open_curriculum"
-
+    # Fast in-memory topic resolution from syllabus for tracking (0ms delay)
+    ch_fast, top_fast, _ = _fast_resolve_topic_from_syllabus(
+        request.question, subject_id_resolved, class_num, conv_last_topic
+    )
+    if ch_fast:
+        routed_chapter = ch_fast
+    if top_fast:
+        routed_topic = top_fast
 
     if attachment_context_str:
-        context = (attachment_context_str + ("\n\n[Relevant NCERT Textbook Context]:\n" + context if context else "")).strip()
+        context = attachment_context_str
         if generation_mode == "conversational":
             generation_mode = "curriculum"
 
@@ -687,6 +716,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         "new_conversation": new_conversation,
         "student_msg_id":   student_msg_id,
         "attachments":      request.attachments or [],
+        "attachment_context_str": attachment_context_str,
         "history":          history,
         "class_num":        class_num,
         "subject_id":       subject_id_resolved,
@@ -749,9 +779,21 @@ def _post_generation_pipeline(
             target=_gen_title, args=(conversation_id, request.question), daemon=True
         ).start()
 
-    # ── Track routed topic in session ─────────────────────────────────────────
+    # ── Track routed topic in session (V4 zero-latency resolution) ───────────
     topic_id = None
-    if routed_topic:
+    if not routed_topic:
+        ch_fast, top_fast, tid_fast = _fast_resolve_topic_from_syllabus(
+            request.question, subject_id_resolved, class_num, ctx.get("conv_last_topic")
+        )
+        if top_fast:
+            routed_topic = top_fast
+            ctx["routed_topic"] = top_fast
+        if ch_fast:
+            ctx["routed_chapter"] = ch_fast
+        if tid_fast:
+            topic_id = tid_fast
+
+    if routed_topic and topic_id is None:
         try:
             topic_id = _resolve_topic_id(routed_topic, class_num, subject_str)
         except Exception as e:
@@ -959,6 +1001,8 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         student_progress=ctx["student_progress_str"],
         user_id=str(user.id),
         conversation_id=str(ctx["conversation_id"]),
+        class_num=ctx["class_num"],
+        attachment_context=ctx.get("attachment_context_str", ""),
     )
     ctx["prompt_messages"] = prompt_messages
     response_time_ms = int((time.time() - gen_start) * 1000)
@@ -1015,9 +1059,10 @@ async def chat_stream(
     yield f"data: {_json.dumps({'type': 'meta', 'conversation_id': str(ctx['conversation_id']), 'is_new_conversation': ctx['new_conversation']})}\n\n"
 
     from app.services.tutor_llm import (
-        _CURRICULUM_PROMPT, _OPEN_CURRICULUM_PROMPT, _CONVERSATIONAL_PROMPT,
+        _V4_DIRECT_TUTOR_PROMPT, _OPEN_CURRICULUM_PROMPT, _CONVERSATIONAL_PROMPT,
         _build_teaching_style, _build_weak_topics_section, _build_review_section,
     )
+    from app.prompts import get_grade_boundary_instructions
     teaching_style = _build_teaching_style(ctx["learning_prefs"] or {})
     weak_section   = _build_weak_topics_section(ctx["weak_topics_str"])
     review_section = _build_review_section(
@@ -1026,16 +1071,19 @@ async def chat_stream(
 
     mode = ctx["generation_mode"]
     if mode == "curriculum":
-        system_content = _CURRICULUM_PROMPT.format(
-            context=ctx["context"] or "(no additional context)",
+        grade_boundaries = get_grade_boundary_instructions(ctx.get("class_num"))
+        att_section = f"\n{ctx.get('attachment_context_str', '')}" if ctx.get("attachment_context_str") else ""
+        system_content = _V4_DIRECT_TUTOR_PROMPT.format(
+            grade_boundaries=grade_boundaries,
+            subject_context=ctx["subject_context_str"],
+            student_progress=ctx["student_progress_str"],
             student_memory=ctx["student_memory_str"] or "(no memory yet)",
             teaching_style=teaching_style,
             weak_topics_section=weak_section,
             review_section=review_section,
-            subject_context=ctx["subject_context_str"],
-            student_progress=ctx["student_progress_str"],
+            attachment_section=att_section,
         )
-        temp, max_tok = 0.3, 1500
+        temp, max_tok = 0.4, 1800
     elif mode == "open_curriculum":
         system_content = _OPEN_CURRICULUM_PROMPT.format(
             student_memory=ctx["student_memory_str"] or "(no memory yet)",

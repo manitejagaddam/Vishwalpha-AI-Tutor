@@ -1,5 +1,6 @@
 import pytest
-from app.services.ingestion_pipeline import IngestionPipeline, PageBlock, IngestionSection
+from app.services.ingestion_pipeline import IngestionPipeline
+from app.services.ingestion.models import PageBlock, IngestionSection
 
 import tempfile
 import os
