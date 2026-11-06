@@ -29,7 +29,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     refreshSessions, refreshProfile, refreshMemory,
     setMetrics, setCognitiveSkills,
     setMetricsAdjustments, setSessionRemark,
-    setLatencyData,
+    setLatencyData, latencyInstances, recordLatencyInstance,
     loadSession
   } = useSession();
 
@@ -229,16 +229,21 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         // onDone
         (data) => {
           const totalClientMs = Date.now() - streamStartTime;
-          if (setLatencyData) {
-            setLatencyData({
-              status: 'completed',
-              isLive: false,
-              client_total_ms: totalClientMs,
-              client_ttft_ms: clientFirstTokenMs || data.timings?.total_ttft_ms || 0,
-              ...(data.timings || {}),
-              timestamp: Date.now(),
-              question_snippet: finalQuestion.slice(0, 45),
-            });
+          const instPayload = {
+            id: data.message_id || `turn-${Date.now()}`,
+            turnIndex: (latencyInstances?.length || 0) + 1,
+            question_snippet: finalQuestion.slice(0, 50),
+            status: 'completed',
+            isLive: false,
+            client_total_ms: totalClientMs,
+            client_ttft_ms: clientFirstTokenMs || data.timings?.total_ttft_ms || 0,
+            ...(data.timings || {}),
+            timestamp: Date.now(),
+          };
+          if (recordLatencyInstance) {
+            recordLatencyInstance(instPayload);
+          } else if (setLatencyData) {
+            setLatencyData(instPayload);
           }
 
           setMessages(prev => {

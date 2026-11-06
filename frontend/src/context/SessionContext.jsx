@@ -26,6 +26,15 @@ export const SessionProvider = ({ children }) => {
   const [sessionRemark, setSessionRemark] = useState('');
   const [subjectId, setSubjectId] = useState(null); // numeric subject_id from backend
   const [latencyData, setLatencyData] = useState(null); // V4 Real-time performance & latency metrics
+  const [latencyInstances, setLatencyInstances] = useState([]); // Per-instance historical latency records
+
+  const recordLatencyInstance = useCallback((inst) => {
+    setLatencyInstances(prev => {
+      const next = [...prev, inst];
+      return next.slice(-60); // keep last 60 turns
+    });
+    setLatencyData(inst);
+  }, []);
   
   const [metricsAdjustments, setMetricsAdjustments] = useState(null);
 
@@ -201,6 +210,8 @@ export const SessionProvider = ({ children }) => {
       sessionRemark, setSessionRemark,
       metricsAdjustments, setMetricsAdjustments,
       latencyData, setLatencyData,
+      latencyInstances, setLatencyInstances,
+      recordLatencyInstance,
       loadSession,
       endSession,
     }}>

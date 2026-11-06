@@ -24,7 +24,7 @@ import logging
 import asyncio
 import re
 import threading
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.legacy import SourceInfo, QuizSuggestion, YesterdayContext
@@ -278,9 +278,55 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
         return None
 
 
-# ── Fast In-Memory L1 Caches for Static Educational Data (0ms latency) ───────
+# ── Fast In-Memory L1 Caches for Static Educational & Session Data (0ms latency) ──
 _IN_MEMORY_SYLLABUS_CACHE: dict[int, str] = {}
 _IN_MEMORY_TOPICS_CACHE: dict[int, list] = {}
+_IN_MEMORY_CONV_CACHE: dict[str, dict] = {}
+
+
+def _save_student_message_sync(
+    conversation_id,
+    question: str,
+    parent_id,
+    idempotency_key,
+    sentiment,
+    bloom_level,
+    contains_question,
+    attachments,
+) -> tuple[Any, int]:
+    """Saves student message node to PostgreSQL asynchronously during LLM stream."""
+    t_start = time.time()
+    try:
+        with managed_session() as db:
+            student_msg = save_message(
+                db,
+                conversation_id=conversation_id,
+                role="student",
+                content=question,
+                parent_message_id=parent_id,
+                idempotency_key=idempotency_key,
+                sentiment=sentiment,
+                bloom_level=bloom_level,
+                contains_question=contains_question
+            )
+            student_msg_id = student_msg.id
+            if attachments:
+                from app.data.models.chat import MessageContentBlock
+                for idx, att in enumerate(attachments, start=1):
+                    ctype = att.get("content_type", "")
+                    b_type = "image" if ctype.startswith("image/") else "text"
+                    db.add(MessageContentBlock(
+                        message_id=student_msg.id,
+                        block_type=b_type,
+                        content=att.get("url") or att.get("filename"),
+                        extra_data=att,
+                        block_index=idx,
+                    ))
+                db.flush()
+        return student_msg_id, int((time.time() - t_start) * 1000)
+    except Exception as e:
+        logger.error(f"Async student message save failed: {e}", exc_info=True)
+        return None, int((time.time() - t_start) * 1000)
 
 
 def _fast_resolve_topic_from_syllabus(
@@ -390,32 +436,49 @@ def _build_subject_context(db, class_num: int, subject_id: int | None) -> str:
         return cached
 
     from app.data.models.content import Subject, Book, Chapter, Topic
-    sub = db.query(Subject).filter(Subject.id == subject_id).first()
-    if not sub:
-        return f"Class {class_num}"
 
-    # Single query: all topics + chapters for this subject, ordered
-    rows = (
-        db.query(Topic, Chapter)
-        .join(Chapter, Topic.chapter_id == Chapter.id)
-        .join(Book, Chapter.book_id == Book.id)
-        .filter(Book.subject_id == subject_id)
-        .order_by(Chapter.display_order, Topic.display_order)
-        .all()
-    )
+    def _query_syllabus(session):
+        sub = session.query(Subject).filter(Subject.id == subject_id).first()
+        if not sub:
+            return f"Class {class_num}"
 
-    context_lines = [f"Class {class_num}, Subject: {sub.name}", "Syllabus (Chapters → Topics):"]
-    current_chapter = None
-    for r in rows:
-        ch = r.Chapter
-        t  = r.Topic
-        if ch.id != current_chapter:
-            current_chapter = ch.id
-            context_lines.append(f"- Chapter {ch.chapter_number}: {ch.title}")
-        t_num = (t.topic_number + " ") if t.topic_number else ""
-        context_lines.append(f"  * {t_num}{t.title}")
+        rows = (
+            session.query(Topic, Chapter)
+            .join(Chapter, Topic.chapter_id == Chapter.id)
+            .join(Book, Chapter.book_id == Book.id)
+            .filter(Book.subject_id == subject_id)
+            .order_by(Chapter.display_order, Topic.display_order)
+            .all()
+        )
 
-    result = "\n".join(context_lines)
+        chapter_map = {}
+        for r in rows:
+            ch = r.Chapter
+            t = r.Topic
+            if ch.id not in chapter_map:
+                chapter_map[ch.id] = {
+                    "num": ch.chapter_number,
+                    "title": ch.title,
+                    "topics": []
+                }
+            if len(chapter_map[ch.id]["topics"]) < 3:
+                t_title = t.title.strip()
+                if t_title and t_title not in chapter_map[ch.id]["topics"]:
+                    chapter_map[ch.id]["topics"].append(t_title)
+
+        context_lines = [f"Class {class_num}, Subject: {sub.name}", "NCERT Curriculum Outline:"]
+        for cid, cinfo in chapter_map.items():
+            top_str = f" (Key topics: {', '.join(cinfo['topics'])})" if cinfo['topics'] else ""
+            context_lines.append(f"- Chapter {cinfo['num']}: {cinfo['title']}{top_str}")
+
+        return "\n".join(context_lines)
+
+    if db is not None:
+        result = _query_syllabus(db)
+    else:
+        with managed_session() as new_db:
+            result = _query_syllabus(new_db)
+
     _IN_MEMORY_SYLLABUS_CACHE[subject_id] = result
     _sc.set_syllabus(subject_id, result)
     return result
@@ -435,151 +498,154 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     board_id = user.profile.board_id if user.profile else None
     subject_id_resolved = request.subject_id
     
-    with managed_session() as db:
-        t_conv_start = time.time()
-        if subject_id_resolved is None and request.subject:
-            from app.api.deps import resolve_subject
-            sub = resolve_subject(db, request.subject, class_num)
-            if sub:
-                subject_id_resolved = sub.id
+    t_conv_start = time.time()
+    conv_cid = str(request.conversation_id) if request.conversation_id else None
+    conv_cached = _IN_MEMORY_CONV_CACHE.get(conv_cid) if conv_cid else None
 
-        conv = get_or_create_conversation(
-            db,
-            user_id=user.id,
-            conversation_id=request.conversation_id,
-            subject_id=subject_id_resolved,
-            study_space_id=request.study_space_id,
-        )
-        conversation_id = conv.id
-        new_conversation = (conv.total_messages == 0)
-        study_space_id = conv.study_space_id
-
-        # Use the conversation's subject if we didn't have one
-        if subject_id_resolved is None and conv.subject_id:
-            subject_id_resolved = conv.subject_id
-            
-        # Extract workspace instructions while session is active
-        space_instructions = ""
-        space_title = ""
-        if study_space_id:
-            try:
-                from app.data.models.content import StudySpace
-                space = db.query(StudySpace).filter(StudySpace.id == study_space_id).first()
-                if space and space.custom_instructions:
-                    space_instructions = space.custom_instructions
-                    space_title = space.title
-            except Exception as e:
-                logger.warning(f"Failed to fetch workspace instructions: {e}")
-            
-        # Fallback to the first subject in the DB if somehow it's still missing 
-        # (prevents foreign key crashes for cross-subject chats until cross-subject metrics are supported)
+    if conv_cached:
+        conversation_id = conv_cached["id"]
+        new_conversation = conv_cached.get("new_conversation", False)
+        study_space_id = conv_cached.get("study_space_id")
+        space_instructions = conv_cached.get("space_instructions", "")
+        space_title = conv_cached.get("space_title", "")
         if subject_id_resolved is None:
-            from app.data.models.content import Subject, SchoolClass
-            first_sub = (
-                db.query(Subject)
-                .join(SchoolClass, Subject.class_id == SchoolClass.id)
-                .filter(SchoolClass.level == class_num)
-                .first()
-            )
-            if not first_sub:
-                first_sub = db.query(Subject).first()
-            if first_sub:
-                subject_id_resolved = first_sub.id
-            else:
-                subject_id_resolved = None   # No subjects in DB — chat proceeds unscoped
-                logger.warning("[Chat] No subject found in DB — student chatting without subject scope.")
-
-        conv_last_topic = conv.last_topic_name if conv else None
-        parent_id = request.parent_message_id or (conv.active_message_id if conv else None)
+            subject_id_resolved = conv_cached.get("subject_id")
+        conv_last_topic = conv_cached.get("last_topic_name")
+        parent_id = request.parent_message_id or conv_cached.get("active_message_id")
         timings["conv_init_ms"] = int((time.time() - t_conv_start) * 1000)
+    else:
+        with managed_session() as db:
+            if subject_id_resolved is None and request.subject:
+                from app.api.deps import resolve_subject
+                sub = resolve_subject(db, request.subject, class_num)
+                if sub:
+                    subject_id_resolved = sub.id
 
-        t_syl = time.time()
-        subject_context_str = _build_subject_context(db, class_num, subject_id_resolved)
-        timings["syllabus_ms"] = int((time.time() - t_syl) * 1000)
+            conv = get_or_create_conversation(
+                db,
+                user_id=user.id,
+                conversation_id=request.conversation_id,
+                subject_id=subject_id_resolved,
+                study_space_id=request.study_space_id,
+            )
+            conversation_id = conv.id
+            new_conversation = (conv.total_messages == 0)
+            study_space_id = conv.study_space_id
 
-        # ── Student topic progress (cached, single optimised query) ───────────
-        t_prog = time.time()
-        student_progress_str = "(No progress data yet — start learning to track your journey!)"
-        if subject_id_resolved:
-            try:
-                sid_int_prog = int(subject_id_resolved)
-                _sc_prog = _get_session_cache()
-                prog_cached = _sc_prog.get_session_progress(str(user.id), sid_int_prog)
-                if prog_cached is None:
-                    from app.data.cognitive_repo import get_student_topic_progress
-                    prog_cached = get_student_topic_progress(str(user.id), subject_id_resolved)
-                    _sc_prog.set_session_progress(str(user.id), sid_int_prog, prog_cached)
-                if prog_cached:
-                    lines = []
-                    if prog_cached.get("mastered"):
-                        lines.append("✅ Mastered topics:")
-                        for t in prog_cached["mastered"][:8]:
-                            lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
-                    if prog_cached.get("in_progress"):
-                        lines.append("📖 Currently learning (in progress):")
-                        for t in prog_cached["in_progress"][:5]:
-                            lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
-                    if prog_cached.get("next_recommended"):
-                        lines.append("🎯 Recommended next topics:")
-                        for t in prog_cached["next_recommended"]:
+            # Use the conversation's subject if we didn't have one
+            if subject_id_resolved is None and conv.subject_id:
+                subject_id_resolved = conv.subject_id
+                
+            # Extract workspace instructions while session is active
+            space_instructions = ""
+            space_title = ""
+            if study_space_id:
+                try:
+                    from app.data.models.content import StudySpace
+                    space = db.query(StudySpace).filter(StudySpace.id == study_space_id).first()
+                    if space and space.custom_instructions:
+                        space_instructions = space.custom_instructions
+                        space_title = space.title
+                except Exception as e:
+                    logger.warning(f"Failed to fetch workspace instructions: {e}")
+                
+            # Fallback to the first subject in the DB if somehow it's still missing
+            if subject_id_resolved is None:
+                from app.data.models.content import Subject, SchoolClass
+                first_sub = (
+                    db.query(Subject)
+                    .join(SchoolClass, Subject.class_id == SchoolClass.id)
+                    .filter(SchoolClass.level == class_num)
+                    .first()
+                )
+                if not first_sub:
+                    first_sub = db.query(Subject).first()
+                if first_sub:
+                    subject_id_resolved = first_sub.id
+                else:
+                    subject_id_resolved = None
+                    logger.warning("[Chat] No subject found in DB — student chatting without subject scope.")
+
+            conv_last_topic = conv.last_topic_name if conv else None
+            parent_id = request.parent_message_id or (conv.active_message_id if conv else None)
+            
+            _IN_MEMORY_CONV_CACHE[str(conversation_id)] = {
+                "id": conversation_id,
+                "new_conversation": new_conversation,
+                "study_space_id": study_space_id,
+                "space_instructions": space_instructions,
+                "space_title": space_title,
+                "subject_id": subject_id_resolved,
+                "last_topic_name": conv_last_topic,
+                "active_message_id": parent_id,
+            }
+            timings["conv_init_ms"] = int((time.time() - t_conv_start) * 1000)
+
+    t_syl = time.time()
+    subject_context_str = _build_subject_context(None, class_num, subject_id_resolved)
+    timings["syllabus_ms"] = int((time.time() - t_syl) * 1000)
+
+    # ── Student topic progress (cached, single optimised query) ───────────
+    t_prog = time.time()
+    student_progress_str = "(No progress data yet — start learning to track your journey!)"
+    if subject_id_resolved:
+        try:
+            sid_int_prog = int(subject_id_resolved)
+            _sc_prog = _get_session_cache()
+            prog_cached = _sc_prog.get_session_progress(str(user.id), sid_int_prog)
+            if prog_cached is None:
+                from app.data.cognitive_repo import get_student_topic_progress
+                prog_cached = get_student_topic_progress(str(user.id), subject_id_resolved)
+                _sc_prog.set_session_progress(str(user.id), sid_int_prog, prog_cached)
+            if prog_cached:
+                lines = []
+                if prog_cached.get("mastered"):
+                    lines.append("✅ Mastered topics:")
+                    for t in prog_cached["mastered"][:8]:
+                        lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
+                if prog_cached.get("in_progress"):
+                    lines.append("📖 Currently learning (in progress):")
+                    for t in prog_cached["in_progress"][:5]:
+                        lines.append(f"  - {t['topic_title']} (Ch. {t['chapter_num']}) — {t['mastery']}% mastery")
+                if prog_cached.get("next_recommended"):
+                    lines.append("🎯 Recommended next topics:")
+                    for t in prog_cached["next_recommended"]:
+                        lines.append(f"  - {t['topic_title']} ({t['chapter']})")
+                if not prog_cached.get("mastered") and not prog_cached.get("in_progress"):
+                    not_started = prog_cached.get("not_started", [])
+                    if not_started:
+                        lines.append("🚀 You haven’t started yet — suggested first topics:")
+                        for t in not_started[:3]:
                             lines.append(f"  - {t['topic_title']} ({t['chapter']})")
-                    if not prog_cached.get("mastered") and not prog_cached.get("in_progress"):
-                        not_started = prog_cached.get("not_started", [])
-                        if not_started:
-                            lines.append("🚀 You haven’t started yet — suggested first topics:")
-                            for t in not_started[:3]:
-                                lines.append(f"  - {t['topic_title']} ({t['chapter']})")
-                    if lines:
-                        student_progress_str = "\n".join(lines)
-            except Exception as _prog_err:
-                logger.warning(f"[Chat] Progress fetch failed: {_prog_err}")
-        timings["progress_ms"] = int((time.time() - t_prog) * 1000)
+                if lines:
+                    student_progress_str = "\n".join(lines)
+        except Exception as _prog_err:
+            logger.warning(f"[Chat] Progress fetch failed: {_prog_err}")
+    timings["progress_ms"] = int((time.time() - t_prog) * 1000)
 
-        # ── Per-message analytics ──────────────────────────────────────────────
-        student_sentiment = detect_sentiment(request.question)
-        student_bloom = detect_bloom_level(request.question)
-        contains_question = "?" in request.question
+    # ── Per-message analytics ──────────────────────────────────────────────
+    student_sentiment = detect_sentiment(request.question)
+    student_bloom = detect_bloom_level(request.question)
+    contains_question = "?" in request.question
 
-        # ── Get History Up To This Message (Linearized working context) ───────
-        t_hist = time.time()
-        history_dicts = get_message_history(
-            db, 
-            conversation_id, 
-            leaf_message_id=parent_id, 
-            limit=18
-        )
-        history = [Msg(h["role"], h["content"]) for h in history_dicts]
-        timings["history_ms"] = int((time.time() - t_hist) * 1000)
-
-        # ── Save Student Message Node ─────────────────────────────────────────
-        t_save = time.time()
-        student_msg = save_message(
-            db,
-            conversation_id=conversation_id,
-            role="student",
-            content=request.question,
-            parent_message_id=parent_id,
-            idempotency_key=request.idempotency_key,
-            sentiment=student_sentiment,
-            bloom_level=student_bloom,
-            contains_question=contains_question
-        )
-        student_msg_id = student_msg.id
-        timings["save_msg_ms"] = int((time.time() - t_save) * 1000)
-
-        if request.attachments:
-            from app.data.models.chat import MessageContentBlock
-            for idx, att in enumerate(request.attachments, start=1):
-                ctype = att.get("content_type", "")
-                b_type = "image" if ctype.startswith("image/") else "text"
-                db.add(MessageContentBlock(
-                    message_id=student_msg.id,
-                    block_type=b_type,
-                    content=att.get("url") or att.get("filename"),
-                    extra_data=att,
-                    block_index=idx,
-                ))
-            db.flush()
+    # ── Get History Up To This Message (Linearized working context) ───────
+    t_hist = time.time()
+    _sc_hist = _get_session_cache()
+    cached_hist = _sc_hist.get_conversation_history(str(conversation_id))
+    if cached_hist is not None and not request.parent_message_id:
+        history = [Msg(h["role"], h["content"]) for h in cached_hist]
+    else:
+        with managed_session() as db:
+            history_dicts = get_message_history(
+                db, 
+                conversation_id, 
+                leaf_message_id=parent_id, 
+                limit=18
+            )
+            history = [Msg(h["role"], h["content"]) for h in history_dicts]
+            _sc_hist.set_conversation_history(str(conversation_id), history_dicts)
+    timings["history_ms"] = int((time.time() - t_hist) * 1000)
+    timings["save_msg_ms"] = 0
 
     # ── Process Student Attachments (Multimodal Context) ──────────────────────
     attachment_context_str = ""
@@ -638,7 +704,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
                 student_id=str(user.id),
                 fact=ff,
                 subject_id=subject_id_resolved,
-                source_message_id=str(student_msg_id),
+                source_message_id=None,
             ):
                 new_fact_added = True
 
@@ -756,7 +822,8 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     return {
         "conversation_id":  conversation_id,
         "new_conversation": new_conversation,
-        "student_msg_id":   student_msg_id,
+        "student_msg_id":   None,
+        "parent_id":        parent_id,
         "attachments":      request.attachments or [],
         "attachment_context_str": attachment_context_str,
         "history":          history,
@@ -1028,6 +1095,23 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
     Full chat pipeline. Returns a ChatResponse ready for JSON serialisation.
     """
     ctx = _build_pipeline_context(request, user)
+    student_msg_id, save_ms = _save_student_message_sync(
+        ctx["conversation_id"],
+        request.question,
+        ctx.get("parent_id"),
+        request.idempotency_key,
+        ctx.get("student_sentiment"),
+        ctx.get("student_bloom"),
+        ctx.get("contains_question", False),
+        request.attachments,
+    )
+    ctx["student_msg_id"] = student_msg_id
+    ctx["timings"]["save_msg_ms"] = save_ms
+    _get_session_cache().append_conversation_history(
+        str(ctx["conversation_id"]),
+        {"role": "student", "content": request.question}
+    )
+
     llm = _get_llm()
 
     gen_start = time.time()
@@ -1053,6 +1137,15 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
     metrics, metrics_adjustments, cognitive_skills, turn_count, pending_tasks, quiz_suggestion_obj, msg_id = (
         _post_generation_pipeline(request, user, ctx, answer, response_time_ms)
     )
+
+    _get_session_cache().append_conversation_history(
+        str(ctx["conversation_id"]),
+        {"role": "assistant", "content": answer}
+    )
+    if str(ctx["conversation_id"]) in _IN_MEMORY_CONV_CACHE:
+        _IN_MEMORY_CONV_CACHE[str(ctx["conversation_id"])]["active_message_id"] = msg_id
+        if ctx.get("routed_topic"):
+            _IN_MEMORY_CONV_CACHE[str(ctx["conversation_id"])]["last_topic_name"] = ctx["routed_topic"]
 
     timings = dict(ctx.get("timings", {}))
     timings["llm_total_ms"] = response_time_ms
@@ -1104,6 +1197,21 @@ async def chat_stream(
     ctx = await asyncio.to_thread(_build_pipeline_context, request, user)
     timings = dict(ctx.get("timings", {}))
     timings["db_prep_ms"] = int((time.time() - t_turn_start) * 1000)
+
+    # ── Kick off async student message persistence concurrently with LLM stream ──
+    save_student_task = asyncio.create_task(
+        asyncio.to_thread(
+            _save_student_message_sync,
+            ctx["conversation_id"],
+            request.question,
+            ctx.get("parent_id"),
+            request.idempotency_key,
+            ctx.get("student_sentiment"),
+            ctx.get("student_bloom"),
+            ctx.get("contains_question", False),
+            request.attachments,
+        )
+    )
 
     llm = _get_llm()
 
@@ -1194,8 +1302,20 @@ async def chat_stream(
                 yield f"data: {_json.dumps({'type': 'token', 'content': token})}\n\n"
     except Exception as exc:
         logger.error(f"Streaming error: {exc}")
+        if not save_student_task.done():
+            save_student_task.cancel()
         yield f"data: {_json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
         return
+
+    # ── Ensure concurrent student message save has completed ────────────────
+    student_msg_id, save_ms = await save_student_task
+    ctx["student_msg_id"] = student_msg_id
+    timings["save_msg_ms"] = save_ms
+
+    _get_session_cache().append_conversation_history(
+        str(ctx["conversation_id"]),
+        {"role": "student", "content": request.question}
+    )
 
     t_stream_end = time.time()
     timings["llm_stream_ms"] = int((t_stream_end - (first_token_time or gen_start)) * 1000)
@@ -1210,6 +1330,15 @@ async def chat_stream(
     ) = await asyncio.to_thread(
         _post_generation_pipeline, request, user, ctx, answer, response_time_ms
     )
+
+    _get_session_cache().append_conversation_history(
+        str(ctx["conversation_id"]),
+        {"role": "assistant", "content": answer}
+    )
+    if str(ctx["conversation_id"]) in _IN_MEMORY_CONV_CACHE:
+        _IN_MEMORY_CONV_CACHE[str(ctx["conversation_id"])]["active_message_id"] = msg_id
+        if ctx.get("routed_topic"):
+            _IN_MEMORY_CONV_CACHE[str(ctx["conversation_id"])]["last_topic_name"] = ctx["routed_topic"]
 
     # ── Final done event ──────────────────────────────────────────────────────
     done_payload = {

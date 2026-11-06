@@ -431,6 +431,37 @@ class RetrievalCache:
             logger.debug(f"Session cache invalidation error: {exc}")
 
 
+    # ── Layer 10: Conversation history cache (sub-millisecond prompt building) ─
+    _HISTORY_TTL = 3600  # 1 hour
+
+    def get_conversation_history(self, conversation_id: str) -> list[dict] | None:
+        raw = self._safe_get(f"sess:history:{conversation_id}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        return None
+
+    def set_conversation_history(self, conversation_id: str, history: list[dict]) -> None:
+        self._safe_setex(
+            f"sess:history:{conversation_id}",
+            self._HISTORY_TTL,
+            json.dumps(history, default=str),
+        )
+
+    def append_conversation_history(self, conversation_id: str, msg: dict) -> None:
+        hist = self.get_conversation_history(conversation_id)
+        if hist is not None:
+            hist.append(msg)
+            if len(hist) > 20:
+                hist = hist[-20:]
+            self.set_conversation_history(conversation_id, hist)
+
+    def invalidate_conversation_history(self, conversation_id: str) -> None:
+        self._safe_del(f"sess:history:{conversation_id}")
+
+
 _retrieval_cache_instance: RetrievalCache | None = None
 
 

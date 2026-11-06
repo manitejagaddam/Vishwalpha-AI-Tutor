@@ -41,7 +41,7 @@ def get_or_create_conversation(
     """Returns an existing conversation or creates a new one."""
     if conversation_id:
         conv = get_conversation(db, conversation_id)
-        if conv and conv.user_id == user_id:
+        if conv and str(conv.user_id) == str(user_id):
             if study_space_id and not conv.study_space_id:
                 conv.study_space_id = study_space_id
                 db.flush()
