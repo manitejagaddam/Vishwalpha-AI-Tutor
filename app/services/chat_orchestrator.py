@@ -635,6 +635,9 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     cached_hist = _sc_hist.get_conversation_history(str(conversation_id))
     if cached_hist is not None and not request.parent_message_id:
         history = [Msg(h["role"], h["content"]) for h in cached_hist]
+    elif new_conversation:
+        history = []
+        _sc_hist.set_conversation_history(str(conversation_id), [])
     else:
         with managed_session() as db:
             history_dicts = get_message_history(
@@ -722,12 +725,31 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     except Exception as e:
         logger.warning(f"[Chat] Real-time memory capture failed: {e}")
 
-    # ── Student memory + learning preferences (session-cached) ───────────────────────
+    # ── Student memory + learning preferences (session-cached, single-pass bundle) ───
     t_prof = time.time()
     memory_items = _sc.get_session_memory(str(user.id), sid_int)
-    if memory_items is None:
-        memory_items = get_student_memory(user.id, subject_id_resolved)
-        _sc.set_session_memory(str(user.id), sid_int, memory_items or [])
+    learning_prefs = _sc.get_session_prefs(str(user.id))
+    cached_weak = _sc.get_session_weak_topics(str(user.id), sid_int)
+
+    # If any profile element is uncached, fetch all three in a single unified DB pass
+    if memory_items is None or learning_prefs is None or cached_weak is None:
+        try:
+            from app.data.cognitive_repo import get_student_profile_bundle
+            m_bundle, p_bundle, w_bundle = get_student_profile_bundle(str(user.id), subject_id_resolved)
+            if memory_items is None:
+                memory_items = m_bundle
+                _sc.set_session_memory(str(user.id), sid_int, memory_items)
+            if learning_prefs is None:
+                learning_prefs = p_bundle
+                _sc.set_session_prefs(str(user.id), learning_prefs)
+            if cached_weak is None:
+                cached_weak = w_bundle
+                _sc.set_session_weak_topics(str(user.id), sid_int, cached_weak)
+        except Exception as _prof_err:
+            logger.warning(f"[Chat] Unified profile bundle fetch error: {_prof_err}")
+            memory_items = memory_items or []
+            learning_prefs = learning_prefs or {}
+            cached_weak = cached_weak or []
 
     # ── Build prioritized student memory string ───────────────────────────────
     # Priority order: (1) goals/exams/high-signal, (2) academic preferences,
@@ -750,31 +772,19 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         ordered = high[:5] + pref[:4] + other[:6]
         return "\n".join(f"- {m}" for m in ordered[:15])
 
-    student_memory_str = _build_priority_memory(memory_items)
+    student_memory_str = _build_priority_memory(memory_items or [])
 
     # ── Study Space custom instructions injection ─────────────────────────────
     if space_instructions:
         student_memory_str = f"[Study Workspace: '{space_title}'] Custom Instructions: {space_instructions}\n" + student_memory_str
 
-    learning_prefs = _sc.get_session_prefs(str(user.id))
-    if learning_prefs is None:
-        learning_prefs = get_learning_preferences(user.id)
-        _sc.set_session_prefs(str(user.id), learning_prefs)
-
-    # ── Weak topics (session-cached) ────────────────────────────────────────────────
+    # ── Weak topics string ───────────────────────────────────────────────────
     weak_topics_str = ""
-    try:
-        cached_weak = _sc.get_session_weak_topics(str(user.id), sid_int)
-        if cached_weak is None:
-            cached_weak = get_student_weak_topics(user.id, subject_id_resolved)
-            _sc.set_session_weak_topics(str(user.id), sid_int, cached_weak or [])
-        if cached_weak:
-            weak_topics_str = "\n".join(
-                f"- {t['topic_title']} (mastery: {t['mastery_level']:.0f}%)"
-                for t in cached_weak[:5]
-            )
-    except Exception as e:
-        logger.warning(f"Weak topics fetch failed: {e}")
+    if cached_weak:
+        weak_topics_str = "\n".join(
+            f"- {t['topic_title']} (mastery: {t['mastery_level']:.0f}%)"
+            for t in cached_weak[:5]
+        )
     timings["profile_ms"] = int((time.time() - t_prof) * 1000)
 
     # ── Question classification (Zero-Latency Heuristic) ──────────────────────

@@ -971,6 +971,67 @@ def prewarm_curriculum_cache() -> None:
         logger.warning(f"Curriculum pre-warming warning: {e}")
 
 
+def get_student_profile_bundle(user_id: str, subject_id: int | None = None) -> tuple[list[str], dict, list[dict]]:
+    """
+    Fetches memory items, learning preferences, and weak topics in a single DB session.
+    Reduces 3 separate remote network connections down to 1.
+    """
+    from app.data.models.content import Topic
+    from app.data.models.learning import StudentMemoryItem, LearningPreference, TopicMastery
+    from sqlalchemy import or_
+
+    with managed_session() as db:
+        # 1. Memory items
+        mem_query = db.query(StudentMemoryItem.fact).filter(
+            StudentMemoryItem.user_id == user_id,
+            StudentMemoryItem.is_active == True,
+        )
+        if subject_id is not None:
+            mem_query = mem_query.filter(
+                or_(
+                    StudentMemoryItem.subject_id == subject_id,
+                    StudentMemoryItem.subject_id.is_(None)
+                )
+            )
+        memory_items = [r[0] for r in mem_query.limit(20).all()]
+
+        # 2. Preferences
+        pref = db.query(LearningPreference).filter(LearningPreference.user_id == user_id).first()
+        if pref:
+            prefs = {
+                "prefers_examples": pref.prefers_examples,
+                "prefers_analogies": pref.prefers_analogies,
+                "prefers_step_by_step": pref.prefers_step_by_step,
+                "prefers_visuals": pref.prefers_visuals,
+                "preferred_length": pref.preferred_length or "medium",
+                "attention_span_minutes": pref.attention_span or 20,
+                "responds_to_encouragement": bool((pref.responds_to_encouragement or 0) > 0.5),
+            }
+        else:
+            prefs = {
+                "prefers_examples": 0.5,
+                "prefers_analogies": 0.5,
+                "prefers_step_by_step": 0.5,
+                "prefers_visuals": 0.5,
+                "preferred_length": "medium",
+                "attention_span_minutes": 50.0,
+                "responds_to_encouragement": True,
+            }
+
+        # 3. Weak topics
+        weak_query = (
+            db.query(TopicMastery.mastery_level, Topic.title)
+            .join(Topic, TopicMastery.topic_id == Topic.id)
+            .filter(TopicMastery.user_id == user_id, TopicMastery.mastery_level < 60)
+        )
+        weak_topics = [
+            {"topic_title": r[1], "mastery_level": r[0]}
+            for r in weak_query.limit(5).all()
+        ]
+
+        return memory_items, prefs, weak_topics
+
+
 
 def get_topics_due_for_review(user_id: str) -> list[dict]:
     """Returns topics whose next_review_date is today or earlier — for spaced repetition."""
