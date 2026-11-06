@@ -278,6 +278,11 @@ def _resolve_topic_id(routed_topic: str, class_num: int | None, subject: str | N
         return None
 
 
+# ── Fast In-Memory L1 Caches for Static Educational Data (0ms latency) ───────
+_IN_MEMORY_SYLLABUS_CACHE: dict[int, str] = {}
+_IN_MEMORY_TOPICS_CACHE: dict[int, list] = {}
+
+
 def _fast_resolve_topic_from_syllabus(
     question: str,
     subject_id: int | None,
@@ -297,52 +302,64 @@ def _fast_resolve_topic_from_syllabus(
     q_words = set(re.findall(r"\w+", q_lower))
     stop_words = {"and", "the", "of", "in", "a", "an", "for", "to", "with", "on", "what", "is", "how", "can", "you", "explain", "tell", "me", "about"}
 
+    global _IN_MEMORY_TOPICS_CACHE
+    topics = _IN_MEMORY_TOPICS_CACHE.get(subject_id)
+    if topics is None:
+        try:
+            from app.data.models.content import Topic, Chapter, Book
+            with managed_session() as db:
+                topics = (
+                    db.query(Topic.id, Topic.title, Chapter.title.label("chapter_title"))
+                    .join(Chapter, Topic.chapter_id == Chapter.id)
+                    .join(Book, Chapter.book_id == Book.id)
+                    .filter(Book.subject_id == subject_id)
+                    .all()
+                )
+                if topics:
+                    _IN_MEMORY_TOPICS_CACHE[subject_id] = topics
+        except Exception as e:
+            logger.warning(f"[V4] Fast topic resolve query failed: {e}")
+
+    if not topics:
+        return ("", conv_last_topic or "", None)
+
     try:
-        from app.data.models.content import Topic, Chapter, Book
-        with managed_session() as db:
-            topics = (
-                db.query(Topic.id, Topic.title, Chapter.title.label("chapter_title"))
-                .join(Chapter, Topic.chapter_id == Chapter.id)
-                .join(Book, Chapter.book_id == Book.id)
-                .filter(Book.subject_id == subject_id)
-                .all()
-            )
-            # 1. Direct substring match
+        # 1. Direct substring match
+        for tid, t_title, ch_title in topics:
+            if len(t_title) > 3 and t_title.lower() in q_lower:
+                return (ch_title, t_title, tid)
+
+        # 2. Keyword token overlap match
+        best_match = None
+        best_score = 0.0
+        for tid, t_title, ch_title in topics:
+            t_words = set(re.findall(r"\w+", t_title.lower())) - stop_words
+            if not t_words:
+                continue
+            common = t_words & q_words
+            if len(common) >= 2 or (len(t_words) == 1 and len(common) == 1):
+                score = len(common) / len(t_words)
+                if score > best_score:
+                    best_score = score
+                    best_match = (ch_title, t_title, tid)
+
+        if best_match:
+            return best_match
+
+        # 3. Chapter title keyword match
+        for tid, t_title, ch_title in topics:
+            ch_words = set(re.findall(r"\w+", ch_title.lower())) - stop_words
+            if not ch_words:
+                continue
+            common = ch_words & q_words
+            if len(common) >= 2 or (len(ch_words) == 1 and len(common) == 1):
+                return (ch_title, t_title, tid)
+
+        # 4. Fallback to conversation's last active topic
+        if conv_last_topic:
             for tid, t_title, ch_title in topics:
-                if len(t_title) > 3 and t_title.lower() in q_lower:
+                if t_title.lower() == conv_last_topic.lower():
                     return (ch_title, t_title, tid)
-
-            # 2. Keyword token overlap match
-            best_match = None
-            best_score = 0.0
-            for tid, t_title, ch_title in topics:
-                t_words = set(re.findall(r"\w+", t_title.lower())) - stop_words
-                if not t_words:
-                    continue
-                common = t_words & q_words
-                if len(common) >= 2 or (len(t_words) == 1 and len(common) == 1):
-                    score = len(common) / len(t_words)
-                    if score > best_score:
-                        best_score = score
-                        best_match = (ch_title, t_title, tid)
-
-            if best_match:
-                return best_match
-
-            # 3. Chapter title keyword match
-            for tid, t_title, ch_title in topics:
-                ch_words = set(re.findall(r"\w+", ch_title.lower())) - stop_words
-                if not ch_words:
-                    continue
-                common = ch_words & q_words
-                if len(common) >= 2 or (len(ch_words) == 1 and len(common) == 1):
-                    return (ch_title, t_title, tid)
-
-            # 4. Fallback to conversation's last active topic
-            if conv_last_topic:
-                for tid, t_title, ch_title in topics:
-                    if t_title.lower() == conv_last_topic.lower():
-                        return (ch_title, t_title, tid)
     except Exception as e:
         logger.warning(f"[V4] Fast topic resolve failed: {e}")
 
@@ -358,13 +375,18 @@ class Msg:
 # ── Shared pre-generation setup ────────────────────────────────────────────────
 
 def _build_subject_context(db, class_num: int, subject_id: int | None) -> str:
-    """Build syllabus tree string. Cached in Redis per subject (24h TTL)."""
+    """Build syllabus tree string. Cached in-memory & Redis per subject (24h TTL)."""
     if not subject_id:
         return f"Class {class_num} (Subject not specified)"
+
+    global _IN_MEMORY_SYLLABUS_CACHE
+    if subject_id in _IN_MEMORY_SYLLABUS_CACHE:
+        return _IN_MEMORY_SYLLABUS_CACHE[subject_id]
 
     _sc = _get_session_cache()
     cached = _sc.get_syllabus(subject_id)
     if cached:
+        _IN_MEMORY_SYLLABUS_CACHE[subject_id] = cached
         return cached
 
     from app.data.models.content import Subject, Book, Chapter, Topic
@@ -394,6 +416,7 @@ def _build_subject_context(db, class_num: int, subject_id: int | None) -> str:
         context_lines.append(f"  * {t_num}{t.title}")
 
     result = "\n".join(context_lines)
+    _IN_MEMORY_SYLLABUS_CACHE[subject_id] = result
     _sc.set_syllabus(subject_id, result)
     return result
 
@@ -405,11 +428,15 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     Returns a dict of everything the generator function needs.
     """
     # In Phase 2, class_num is on the User model
+    t_prep_start = time.time()
+    timings: dict[str, int] = {}
+
     class_num = user.class_num
     board_id = user.profile.board_id if user.profile else None
     subject_id_resolved = request.subject_id
     
     with managed_session() as db:
+        t_conv_start = time.time()
         if subject_id_resolved is None and request.subject:
             from app.api.deps import resolve_subject
             sub = resolve_subject(db, request.subject, class_num)
@@ -464,10 +491,14 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
 
         conv_last_topic = conv.last_topic_name if conv else None
         parent_id = request.parent_message_id or (conv.active_message_id if conv else None)
+        timings["conv_init_ms"] = int((time.time() - t_conv_start) * 1000)
 
+        t_syl = time.time()
         subject_context_str = _build_subject_context(db, class_num, subject_id_resolved)
+        timings["syllabus_ms"] = int((time.time() - t_syl) * 1000)
 
         # ── Student topic progress (cached, single optimised query) ───────────
+        t_prog = time.time()
         student_progress_str = "(No progress data yet — start learning to track your journey!)"
         if subject_id_resolved:
             try:
@@ -502,6 +533,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
                         student_progress_str = "\n".join(lines)
             except Exception as _prog_err:
                 logger.warning(f"[Chat] Progress fetch failed: {_prog_err}")
+        timings["progress_ms"] = int((time.time() - t_prog) * 1000)
 
         # ── Per-message analytics ──────────────────────────────────────────────
         student_sentiment = detect_sentiment(request.question)
@@ -509,6 +541,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         contains_question = "?" in request.question
 
         # ── Get History Up To This Message (Linearized working context) ───────
+        t_hist = time.time()
         history_dicts = get_message_history(
             db, 
             conversation_id, 
@@ -516,8 +549,10 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
             limit=18
         )
         history = [Msg(h["role"], h["content"]) for h in history_dicts]
+        timings["history_ms"] = int((time.time() - t_hist) * 1000)
 
         # ── Save Student Message Node ─────────────────────────────────────────
+        t_save = time.time()
         student_msg = save_message(
             db,
             conversation_id=conversation_id,
@@ -530,6 +565,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
             contains_question=contains_question
         )
         student_msg_id = student_msg.id
+        timings["save_msg_ms"] = int((time.time() - t_save) * 1000)
 
         if request.attachments:
             from app.data.models.chat import MessageContentBlock
@@ -620,6 +656,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         logger.warning(f"[Chat] Real-time memory capture failed: {e}")
 
     # ── Student memory + learning preferences (session-cached) ───────────────────────
+    t_prof = time.time()
     memory_items = _sc.get_session_memory(str(user.id), sid_int)
     if memory_items is None:
         memory_items = get_student_memory(user.id, subject_id_resolved)
@@ -671,6 +708,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
             )
     except Exception as e:
         logger.warning(f"Weak topics fetch failed: {e}")
+    timings["profile_ms"] = int((time.time() - t_prof) * 1000)
 
     # ── Question classification (Zero-Latency Heuristic) ──────────────────────
     referential_triggers = {
@@ -698,6 +736,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
     confident_chunks: list[dict] = []
 
     # Fast in-memory topic resolution from syllabus for tracking (0ms delay)
+    t_match = time.time()
     ch_fast, top_fast, _ = _fast_resolve_topic_from_syllabus(
         request.question, subject_id_resolved, class_num, conv_last_topic
     )
@@ -705,11 +744,14 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         routed_chapter = ch_fast
     if top_fast:
         routed_topic = top_fast
+    timings["topic_match_ms"] = int((time.time() - t_match) * 1000)
 
     if attachment_context_str:
         context = attachment_context_str
         if generation_mode == "conversational":
             generation_mode = "curriculum"
+
+    timings["db_prep_ms"] = int((time.time() - t_prep_start) * 1000)
 
     return {
         "conversation_id":  conversation_id,
@@ -738,6 +780,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         "student_sentiment": student_sentiment,
         "student_bloom":    student_bloom,
         "contains_question": contains_question,
+        "timings":          timings,
     }
 
 
@@ -1011,6 +1054,10 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
         _post_generation_pipeline(request, user, ctx, answer, response_time_ms)
     )
 
+    timings = dict(ctx.get("timings", {}))
+    timings["llm_total_ms"] = response_time_ms
+    timings["total_turn_ms"] = response_time_ms + timings.get("db_prep_ms", 0)
+
     return ChatResponse(
         conversation_id=ctx["conversation_id"],
         message_id=msg_id,
@@ -1038,6 +1085,7 @@ def chat(request: ChatRequest, user: User) -> ChatResponse:
             for c in ctx.get("confident_chunks", [])
         ],
         prompt_messages=prompt_messages,
+        timings=timings,
     )
 
 
@@ -1050,13 +1098,17 @@ async def chat_stream(
     from app.infra.azure_openai_client import get_openai
     from app.config import settings
 
+    t_turn_start = time.time()
+
     # ── Build context (runs sync DB calls in a thread pool) ───────────────────
     ctx = await asyncio.to_thread(_build_pipeline_context, request, user)
+    timings = dict(ctx.get("timings", {}))
+    timings["db_prep_ms"] = int((time.time() - t_turn_start) * 1000)
 
     llm = _get_llm()
 
-    # ── Emit meta event first so frontend knows conversation_id immediately ───
-    yield f"data: {_json.dumps({'type': 'meta', 'conversation_id': str(ctx['conversation_id']), 'is_new_conversation': ctx['new_conversation']})}\n\n"
+    # ── Emit meta event first so frontend knows conversation_id & prep timings immediately ───
+    yield f"data: {_json.dumps({'type': 'meta', 'conversation_id': str(ctx['conversation_id']), 'is_new_conversation': ctx['new_conversation'], 'timings': timings})}\n\n"
 
     from app.services.tutor_llm import (
         _V4_DIRECT_TUTOR_PROMPT, _OPEN_CURRICULUM_PROMPT, _CONVERSATIONAL_PROMPT,
@@ -1117,6 +1169,7 @@ async def chat_stream(
     client  = get_openai()
     full_answer = []
     gen_start   = time.time()
+    first_token_time = None
 
     try:
         stream = await asyncio.to_thread(
@@ -1132,6 +1185,11 @@ async def chat_stream(
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 token = delta.content
+                if first_token_time is None:
+                    first_token_time = time.time()
+                    timings["llm_ttft_ms"] = int((first_token_time - gen_start) * 1000)
+                    timings["total_ttft_ms"] = int((first_token_time - t_turn_start) * 1000)
+                    yield f"data: {_json.dumps({'type': 'latency_update', 'timings': timings})}\n\n"
                 full_answer.append(token)
                 yield f"data: {_json.dumps({'type': 'token', 'content': token})}\n\n"
     except Exception as exc:
@@ -1139,7 +1197,10 @@ async def chat_stream(
         yield f"data: {_json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
         return
 
-    response_time_ms = int((time.time() - gen_start) * 1000)
+    t_stream_end = time.time()
+    timings["llm_stream_ms"] = int((t_stream_end - (first_token_time or gen_start)) * 1000)
+    timings["total_turn_ms"] = int((t_stream_end - t_turn_start) * 1000)
+    response_time_ms = int((t_stream_end - gen_start) * 1000)
     answer = "".join(full_answer)
 
     # ── Post-generation (persist, metrics, etc.) in a thread ─────────────────
@@ -1176,5 +1237,6 @@ async def chat_stream(
             for c in ctx.get("confident_chunks", [])
         ],
         "prompt_messages":  messages,
+        "timings":          timings,
     }
     yield f"data: {_json.dumps(done_payload)}\n\n"

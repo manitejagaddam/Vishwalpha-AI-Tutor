@@ -13,6 +13,7 @@ it just means every request hits the DB directly.
 import re
 import json
 import logging
+import time
 
 import redis as redis_lib
 
@@ -26,7 +27,7 @@ def _build_redis_client() -> "redis_lib.Redis | None":
     try:
         if settings.REDIS_URL:
             client = redis_lib.Redis.from_url(
-                settings.REDIS_URL, socket_timeout=2.0, decode_responses=True
+                settings.REDIS_URL, socket_timeout=1.0, decode_responses=True
             )
         else:
             client = redis_lib.Redis(
@@ -35,53 +36,98 @@ def _build_redis_client() -> "redis_lib.Redis | None":
                 username=settings.REDIS_USERNAME,
                 password=settings.REDIS_PASSWORD,
                 decode_responses=True,
-                socket_timeout=2.0,
+                socket_timeout=1.0,
             )
         client.ping()
         logger.info("Redis cache: connected.")
         return client
     except Exception as exc:
-        logger.warning(f"Redis unavailable ({exc}). Cache disabled — falling back to DB.")
+        logger.warning(f"Redis unavailable ({exc}). Cache falling back to fast in-memory L1 cache + DB.")
         return None
 
 
 class RetrievalCache:
     """
-    3-layer Redis cache. Instantiate once and share (singleton pattern).
+    3-layer cache with fast in-memory L1 layer + Redis L2 layer.
+    Instantiate once and share (singleton pattern).
     Every public method is safe to call even when Redis is down.
     """
 
     def __init__(self):
         self._client = _build_redis_client()
+        self._l1_cache: dict[str, tuple[float, str]] = {}  # key -> (expires_at, val)
+        self._failures = 0
+        self._redis_disabled_until = 0.0
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower().strip()))
 
-    def _safe_get(self, key: str):
+    def _is_redis_available(self) -> bool:
         if not self._client:
+            return False
+        if time.time() < self._redis_disabled_until:
+            return False
+        return True
+
+    def _safe_get(self, key: str):
+        now = time.time()
+        # Check fast L1 in-memory cache first (0ms)
+        if key in self._l1_cache:
+            exp, val = self._l1_cache[key]
+            if now < exp:
+                return val
+            else:
+                self._l1_cache.pop(key, None)
+
+        if not self._is_redis_available():
             return None
         try:
-            return self._client.get(key)
+            val = self._client.get(key)
+            self._failures = 0
+            if val is not None:
+                # Store in L1 for 5 minutes to avoid Redis socket hops
+                self._l1_cache[key] = (now + 300, val)
+            return val
         except Exception as exc:
+            self._failures += 1
+            if self._failures >= 2:
+                self._redis_disabled_until = time.time() + 60.0
+                logger.warning(f"Redis circuit breaker tripped for 60s due to errors: {exc}")
             logger.debug(f"Cache GET error [{key}]: {exc}")
             return None
 
     def _safe_setex(self, key: str, ttl: int, value: str) -> None:
-        if not self._client:
+        now = time.time()
+        # Always set in fast L1 in-memory cache
+        self._l1_cache[key] = (now + ttl, value)
+
+        if not self._is_redis_available():
             return
         try:
             self._client.setex(key, ttl, value)
+            self._failures = 0
         except Exception as exc:
+            self._failures += 1
+            if self._failures >= 2:
+                self._redis_disabled_until = time.time() + 60.0
+                logger.warning(f"Redis circuit breaker tripped for 60s due to errors: {exc}")
             logger.debug(f"Cache SET error [{key}]: {exc}")
 
     def _safe_del(self, *keys: str) -> None:
-        if not self._client or not keys:
+        for k in keys:
+            self._l1_cache.pop(k, None)
+
+        if not self._is_redis_available() or not keys:
             return
         try:
             self._client.delete(*keys)
+            self._failures = 0
         except Exception as exc:
+            self._failures += 1
+            if self._failures >= 2:
+                self._redis_disabled_until = time.time() + 60.0
             logger.debug(f"Cache DEL error: {exc}")
 
     # ── Layer 1: Embedding cache ───────────────────────────────────────────────

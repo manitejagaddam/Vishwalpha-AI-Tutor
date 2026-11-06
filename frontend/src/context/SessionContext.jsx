@@ -25,6 +25,7 @@ export const SessionProvider = ({ children }) => {
   const [cognitiveSkills, setCognitiveSkills] = useState({});
   const [sessionRemark, setSessionRemark] = useState('');
   const [subjectId, setSubjectId] = useState(null); // numeric subject_id from backend
+  const [latencyData, setLatencyData] = useState(null); // V4 Real-time performance & latency metrics
   
   const [metricsAdjustments, setMetricsAdjustments] = useState(null);
 
@@ -199,6 +200,7 @@ export const SessionProvider = ({ children }) => {
       refreshProfile,
       sessionRemark, setSessionRemark,
       metricsAdjustments, setMetricsAdjustments,
+      latencyData, setLatencyData,
       loadSession,
       endSession,
     }}>

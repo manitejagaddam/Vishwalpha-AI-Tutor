@@ -66,3 +66,4 @@ def test_fast_resolve_topic_fallback():
     )
     assert top == "Electricity"
     assert tid is None
+

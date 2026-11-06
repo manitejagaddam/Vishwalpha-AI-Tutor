@@ -29,6 +29,7 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     refreshSessions, refreshProfile, refreshMemory,
     setMetrics, setCognitiveSkills,
     setMetricsAdjustments, setSessionRemark,
+    setLatencyData,
     loadSession
   } = useSession();
 
@@ -164,6 +165,17 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
     
     setIsThinking(true);
 
+    const streamStartTime = Date.now();
+    let clientFirstTokenMs = null;
+    if (setLatencyData) {
+      setLatencyData({
+        status: 'preparing',
+        isLive: true,
+        turnStartTime: streamStartTime,
+        question_snippet: finalQuestion.slice(0, 45),
+      });
+    }
+
     try {
       // Cancel any previous in-flight stream before starting a new one
       if (streamAbortRef.current) streamAbortRef.current.abort();
@@ -192,6 +204,16 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
             }
           }
           if (token) {
+            if (clientFirstTokenMs === null) {
+              clientFirstTokenMs = Date.now() - streamStartTime;
+              if (setLatencyData) {
+                setLatencyData(prev => ({
+                  ...(prev || {}),
+                  status: 'streaming',
+                  client_ttft_ms: clientFirstTokenMs,
+                }));
+              }
+            }
             setIsThinking(false);
             setMessages(prev => {
               const idx = prev.findIndex(m => m.id === clientTempId);
@@ -206,6 +228,19 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         },
         // onDone
         (data) => {
+          const totalClientMs = Date.now() - streamStartTime;
+          if (setLatencyData) {
+            setLatencyData({
+              status: 'completed',
+              isLive: false,
+              client_total_ms: totalClientMs,
+              client_ttft_ms: clientFirstTokenMs || data.timings?.total_ttft_ms || 0,
+              ...(data.timings || {}),
+              timestamp: Date.now(),
+              question_snippet: finalQuestion.slice(0, 45),
+            });
+          }
+
           setMessages(prev => {
             // Locate the streaming message by temp ID or server ID
             let targetIdx = prev.findIndex(m => m.id === clientTempId || (data.message_id && m.id === data.message_id));
@@ -264,6 +299,14 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
         },
         // onError
         (e) => {
+          if (setLatencyData) {
+            setLatencyData(prev => ({
+              ...(prev || {}),
+              status: 'error',
+              isLive: false,
+              errorMessage: e.message,
+            }));
+          }
           setMessages(prev => {
             const newMsgs = [...prev];
             const last = { ...newMsgs[newMsgs.length - 1] };
@@ -273,10 +316,29 @@ export default function ChatArea({ activeQuiz, onStartQuiz, onQuizClose }) {
             return newMsgs;
           });
           setIsThinking(false);
+        },
+        // onLatency (real-time server timings SSE)
+        (timings) => {
+          if (setLatencyData) {
+            setLatencyData(prev => ({
+              ...(prev || {}),
+              ...timings,
+              isLive: true,
+              status: 'streaming',
+            }));
+          }
         }
       );
       streamAbortRef.current = controller;
     } catch (e) {
+      if (setLatencyData) {
+        setLatencyData(prev => ({
+          ...(prev || {}),
+          status: 'error',
+          isLive: false,
+          errorMessage: e.message,
+        }));
+      }
       setMessages(prev => {
         const newMsgs = [...prev];
         const last = { ...newMsgs[newMsgs.length - 1] };

@@ -4,6 +4,7 @@ import { useSession } from '../../context/SessionContext';
 import { searchApi } from '../../api/client';
 import { LogOut, BrainCircuit, Activity, Clock, Zap, BookOpen, Folder, Plus, Search, X } from 'lucide-react';
 import StudySpaceModal from './StudySpaceModal';
+import LatencyDashboard from './LatencyDashboard';
 
 /** Returns a human-readable session title from DB metadata */
 function sessionTitle(s) {
@@ -163,6 +164,9 @@ export default function Sidebar({ onStartQuiz, onNewChat }) {
             Take a Quiz
           </button>
         </div>
+
+        {/* Latency & Performance Dashboard */}
+        <LatencyDashboard />
 
         {/* Sessions & Search */}
         <div>

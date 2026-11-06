@@ -113,7 +113,7 @@ export const chatApi = {
   // New SSE streaming call — returns an AbortController so caller can cancel on unmount.
   // FE-02: Hard 90-second timeout via AbortController.
   // FE-03: Caller must call controller.abort() in useEffect cleanup.
-  sendMessageStream: (data, onChunk, onDone, onError) => {
+  sendMessageStream: (data, onChunk, onDone, onError, onLatency = null) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90_000);
 
@@ -163,6 +163,8 @@ export const chatApi = {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.type === 'token') {
                   onChunk(parsed.content);
+                } else if (parsed.type === 'latency_update') {
+                  if (onLatency) onLatency(parsed.timings);
                 } else if (parsed.type === 'done') {
                   onDone(parsed);
                 } else if (parsed.type === 'error') {

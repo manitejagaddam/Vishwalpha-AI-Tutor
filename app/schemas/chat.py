@@ -72,3 +72,4 @@ class ChatResponse(BaseModel):
     context: str = ""
     chunks: List[Dict[str, Any]] = []
     prompt_messages: List[Dict[str, Any]] = []
+    timings: Dict[str, Any] = {}
