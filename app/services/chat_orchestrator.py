@@ -814,7 +814,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
 
     # Fast in-memory topic resolution from syllabus for tracking (0ms delay)
     t_match = time.time()
-    ch_fast, top_fast, _ = _fast_resolve_topic_from_syllabus(
+    ch_fast, top_fast, tid_fast = _fast_resolve_topic_from_syllabus(
         request.question, subject_id_resolved, class_num, conv_last_topic
     )
     if ch_fast:
@@ -854,6 +854,7 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
         "sources":          sources,
         "routed_chapter":   routed_chapter,
         "routed_topic":     routed_topic,
+        "topic_id":         tid_fast,
         "conv_last_topic":  conv_last_topic,
         "student_sentiment": student_sentiment,
         "student_bloom":    student_bloom,
@@ -901,7 +902,7 @@ def _post_generation_pipeline(
         ).start()
 
     # ── Track routed topic in session (V4 zero-latency resolution) ───────────
-    topic_id = None
+    topic_id = ctx.get("topic_id")
     if not routed_topic:
         ch_fast, top_fast, tid_fast = _fast_resolve_topic_from_syllabus(
             request.question, subject_id_resolved, class_num, ctx.get("conv_last_topic")
@@ -1033,16 +1034,16 @@ def _post_generation_pipeline(
             daemon=True,
         ).start()
 
-        # ── Topic mastery (background persistence) ───────────────────────────
+        # ── Topic mastery (background persistence & in-place cache update) ───
         if topic_id and generation_mode == "curriculum":
             _sid_bg = int(subject_id_resolved) if subject_id_resolved else 0
             _uid_bg = str(user.id)
             def _update_mastery_bg(_uid=_uid_bg, _tid=topic_id, _bloom=student_bloom, _sc_ref=_sc, _sid=_sid_bg):
                 try:
-                    update_topic_mastery_from_chat(_uid, _tid, _bloom)
-                    # Note: We do NOT delete progress cache on every chat turn.
-                    # Topic progress is cached for the session (4h TTL) and refreshed
-                    # upon quiz completion or deep session sync, keeping chat TTFT at sub-second speeds.
+                    new_lvl, new_bloom, t_title = update_topic_mastery_from_chat(_uid, _tid, _bloom)
+                    # Update progress in-place in Redis & L1 (0ms latency, zero cache busting)
+                    if t_title:
+                        _sc_ref.update_cached_topic_mastery(_uid, _sid, t_title, new_lvl, new_bloom)
                 except Exception as _e:
                     logger.warning(f"Topic mastery update failed: {_e}")
             threading.Thread(target=_update_mastery_bg, daemon=True).start()

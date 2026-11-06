@@ -681,6 +681,11 @@ def update_topic_mastery_from_chat(
             new_value=mastery.mastery_level,
         ))
 
+        from app.data.models.content import Topic
+        t_row = db.query(Topic.title).filter(Topic.id == topic_id).first()
+        t_title = t_row[0] if t_row else ""
+        return float(mastery.mastery_level or 0.0), int(mastery.bloom_level_reached or 1), t_title
+
 
 def update_topic_mastery_from_quiz(
     user_id: str, topic_id: int, quiz_score: float, passed: bool

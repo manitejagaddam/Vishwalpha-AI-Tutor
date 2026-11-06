@@ -412,6 +412,52 @@ class RetrievalCache:
             json.dumps(progress),
         )
 
+    def update_cached_topic_mastery(
+        self, user_id: str, subject_id: int, topic_title: str, new_mastery: float, bloom_level: int
+    ) -> None:
+        """
+        Updates a topic's mastery level in the cached progress map in-place (L1 + Redis).
+        Prevents cache busting while ensuring the student's progress matrix updates live.
+        """
+        prog = self.get_session_progress(user_id, subject_id)
+        if not prog or not topic_title:
+            return
+
+        mastered = prog.get("mastered", [])
+        in_prog = prog.get("in_progress", [])
+        not_started = prog.get("not_started", [])
+        next_rec = prog.get("next_recommended", [])
+
+        # Find existing item if present
+        t_clean = topic_title.strip().lower()
+        found_entry = None
+        for lst in [mastered, in_prog, not_started, next_rec]:
+            for item in list(lst):
+                if item.get("topic_title", "").strip().lower() == t_clean:
+                    found_entry = item
+                    lst.remove(item)
+                    break
+            if found_entry:
+                break
+
+        if not found_entry:
+            found_entry = {"topic_title": topic_title, "chapter": "", "chapter_num": 1}
+
+        found_entry["mastery"] = round(new_mastery)
+        found_entry["bloom_level"] = bloom_level
+
+        # Re-categorize based on standard mastery thresholds (≥70% is Mastered)
+        if new_mastery >= 70:
+            mastered.insert(0, found_entry)
+        else:
+            in_prog.insert(0, found_entry)
+
+        prog["mastered"] = mastered[:12]
+        prog["in_progress"] = in_prog[:8]
+        prog["not_started"] = not_started
+
+        self.set_session_progress(user_id, subject_id, prog)
+
     def invalidate_session_state(self, user_id: str, subject_id: int) -> None:
         """
         Called after every batch update to force a fresh DB read on the next turn.
