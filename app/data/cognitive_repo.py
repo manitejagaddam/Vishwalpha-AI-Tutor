@@ -846,6 +846,9 @@ def get_student_strong_topics(user_id: str, subject_id: int | None = None) -> li
         ]
 
 
+_STATIC_SUBJECT_TOPICS_CACHE: dict[int, list[dict]] = {}
+
+
 def get_student_topic_progress(user_id: str, subject_id: int) -> dict:
     """
     Returns a structured progress map for a student in a subject:
@@ -856,59 +859,72 @@ def get_student_topic_progress(user_id: str, subject_id: int) -> dict:
         "next_recommended": [{"topic_title": ..., "chapter": ...}],              # up to 3 natural next topics
       }
 
-    Uses a single optimised JOIN across Topic → Chapter → Book → Subject.
-    This is the data that gets injected into every LLM prompt via subject_context.
+    Uses in-memory static curriculum topics + fast indexed user TopicMastery lookup.
+    Avoids expensive multi-second full ORM joins across 300+ topic entities.
     """
+    global _STATIC_SUBJECT_TOPICS_CACHE
     from app.data.models.content import Book
-    from sqlalchemy import outerjoin
 
+    sid = int(subject_id)
     with managed_session() as db:
-        # ── 1. Fetch all topics for this subject with their chapter names ──────
-        rows = (
-            db.query(Topic, Chapter)
-            .join(Chapter, Topic.chapter_id == Chapter.id)
-            .join(Book, Chapter.book_id == Book.id)
-            .filter(Book.subject_id == subject_id)
-            .order_by(Chapter.display_order, Topic.display_order)
-            .all()
-        )
+        # ── 1. Fetch or reuse static topics metadata for this subject (0ms warm) ──
+        if sid not in _STATIC_SUBJECT_TOPICS_CACHE:
+            # Query lightweight scalar columns instead of full ORM objects
+            topic_rows = (
+                db.query(Topic.id, Topic.title, Chapter.title, Chapter.chapter_number)
+                .join(Chapter, Topic.chapter_id == Chapter.id)
+                .join(Book, Chapter.book_id == Book.id)
+                .filter(Book.subject_id == sid)
+                .order_by(Chapter.display_order, Topic.display_order)
+                .all()
+            )
+            _STATIC_SUBJECT_TOPICS_CACHE[sid] = [
+                {
+                    "id": r[0],
+                    "topic_title": r[1],
+                    "chapter": r[2],
+                    "chapter_num": r[3],
+                }
+                for r in topic_rows
+            ]
 
-        if not rows:
+        topics = _STATIC_SUBJECT_TOPICS_CACHE[sid]
+        if not topics:
             return {"mastered": [], "in_progress": [], "not_started": [], "next_recommended": []}
 
-        # ── 2. Fetch all mastery rows for this student in one query ───────────
-        topic_ids = [r.Topic.id for r in rows]
+        # ── 2. Fetch student's mastery rows using fast indexed user_id filter ───
+        # Most students have only a few dozen visited topics; querying by user_id
+        # is single-index fast (~100-140ms on remote Supabase vs 7000ms+ full ORM join)
         mastery_rows = (
-            db.query(TopicMastery)
-            .filter(
-                TopicMastery.user_id == user_id,
-                TopicMastery.topic_id.in_(topic_ids),
+            db.query(
+                TopicMastery.topic_id,
+                TopicMastery.mastery_level,
+                TopicMastery.times_visited,
+                TopicMastery.bloom_level_reached,
             )
+            .filter(TopicMastery.user_id == str(user_id))
             .all()
         )
-        mastery_map = {m.topic_id: m for m in mastery_rows}
+        mastery_map = {m[0]: m for m in mastery_rows}
 
         # ── 3. Classify topics ────────────────────────────────────────────────
         mastered, in_progress, not_started = [], [], []
-        for r in rows:
-            t = r.Topic
-            ch = r.Chapter
-            m = mastery_map.get(t.id)
-            entry = {"topic_title": t.title, "chapter": ch.title, "chapter_num": ch.chapter_number}
-            if m is None or m.times_visited == 0:
+        for t in topics:
+            m = mastery_map.get(t["id"])
+            entry = {"topic_title": t["topic_title"], "chapter": t["chapter"], "chapter_num": t["chapter_num"]}
+            if m is None or (m[2] or 0) == 0:
                 entry["mastery"] = 0
                 not_started.append(entry)
-            elif m.mastery_level >= 70:
-                entry["mastery"] = round(m.mastery_level)
-                entry["bloom_level"] = m.bloom_level_reached
+            elif (m[1] or 0) >= 70:
+                entry["mastery"] = round(m[1])
+                entry["bloom_level"] = m[3]
                 mastered.append(entry)
             else:
-                entry["mastery"] = round(m.mastery_level)
-                entry["bloom_level"] = m.bloom_level_reached
+                entry["mastery"] = round(m[1] or 0)
+                entry["bloom_level"] = m[3]
                 in_progress.append(entry)
 
         # ── 4. Recommended next: first 3 not-started topics after in-progress ─
-        # Natural learning order: continue in-progress first, then first not-started
         next_recommended = []
         for t in in_progress[:2]:
             next_recommended.append({"topic_title": t["topic_title"], "chapter": t["chapter"]})
@@ -922,6 +938,37 @@ def get_student_topic_progress(user_id: str, subject_id: int) -> dict:
             "not_started": not_started,
             "next_recommended": next_recommended,
         }
+
+
+def prewarm_curriculum_cache() -> None:
+    """Preloads static topics for active subjects in the background on startup."""
+    global _STATIC_SUBJECT_TOPICS_CACHE
+    try:
+        from app.data.models.content import Subject, Book
+        with managed_session() as db:
+            subs = db.query(Subject.id).all()
+            for (sid,) in subs:
+                if sid not in _STATIC_SUBJECT_TOPICS_CACHE:
+                    topic_rows = (
+                        db.query(Topic.id, Topic.title, Chapter.title, Chapter.chapter_number)
+                        .join(Chapter, Topic.chapter_id == Chapter.id)
+                        .join(Book, Chapter.book_id == Book.id)
+                        .filter(Book.subject_id == sid)
+                        .order_by(Chapter.display_order, Topic.display_order)
+                        .all()
+                    )
+                    _STATIC_SUBJECT_TOPICS_CACHE[sid] = [
+                        {
+                            "id": r[0],
+                            "topic_title": r[1],
+                            "chapter": r[2],
+                            "chapter_num": r[3],
+                        }
+                        for r in topic_rows
+                    ]
+        logger.info(f"Curriculum cache pre-warmed for {len(_STATIC_SUBJECT_TOPICS_CACHE)} subjects.")
+    except Exception as e:
+        logger.warning(f"Curriculum pre-warming warning: {e}")
 
 
 

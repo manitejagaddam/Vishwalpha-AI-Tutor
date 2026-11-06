@@ -35,11 +35,13 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ── App Lifespan ──────────────────────────────────────────────────────────────
 async def background_startup_tasks():
-    """Runs synchronous startup tasks (like DB init) in a background thread."""
+    """Runs synchronous startup tasks (like DB init and cache pre-warming) in a background thread."""
     try:
         logger.info("Starting background DB initialisation...")
         await asyncio.to_thread(init_db)
         logger.info("Background DB initialisation finished.")
+        from app.data.cognitive_repo import prewarm_curriculum_cache
+        await asyncio.to_thread(prewarm_curriculum_cache)
     except Exception as e:
         logger.error(f"Error during background startup tasks: {e}")
 

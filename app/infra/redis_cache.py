@@ -394,6 +394,8 @@ class RetrievalCache:
     # subject. Built by get_student_topic_progress(). Updated after quiz finishes
     # or session-end sync runs. TTL: 30min (same as session window).
 
+    _PROGRESS_TTL = 3600 * 4  # 4 hours (survives across learning sessions)
+
     def get_session_progress(self, user_id: str, subject_id: int) -> dict | None:
         raw = self._safe_get(f"sess:progress:{user_id}:{subject_id}")
         if raw:
@@ -406,14 +408,15 @@ class RetrievalCache:
     def set_session_progress(self, user_id: str, subject_id: int, progress: dict) -> None:
         self._safe_setex(
             f"sess:progress:{user_id}:{subject_id}",
-            self._SESSION_TTL,
+            self._PROGRESS_TTL,
             json.dumps(progress),
         )
 
     def invalidate_session_state(self, user_id: str, subject_id: int) -> None:
         """
-        Called after every batch update (every 4 turns) to force a fresh DB read
-        on the next turn. Also call after quiz completion or profile preset change.
+        Called after every batch update to force a fresh DB read on the next turn.
+        Also call after quiz completion or profile preset change.
+        Clears both in-memory L1 cache and Redis.
         """
         keys = [
             f"sess:metrics:{user_id}:{subject_id}",
@@ -422,13 +425,8 @@ class RetrievalCache:
             f"sess:weak:{user_id}:{subject_id}",
             f"sess:progress:{user_id}:{subject_id}",
         ]
-        if not self._client:
-            return
-        try:
-            self._client.delete(*keys)
-            logger.debug(f"Session state cache invalidated for user={user_id} subject={subject_id}")
-        except Exception as exc:
-            logger.debug(f"Session cache invalidation error: {exc}")
+        self._safe_del(*keys)
+        logger.debug(f"Session state cache invalidated for user={user_id} subject={subject_id}")
 
 
     # ── Layer 10: Conversation history cache (sub-millisecond prompt building) ─

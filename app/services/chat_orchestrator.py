@@ -595,8 +595,9 @@ def _build_pipeline_context(request: ChatRequest, user: User) -> dict:
             prog_cached = _sc_prog.get_session_progress(str(user.id), sid_int_prog)
             if prog_cached is None:
                 from app.data.cognitive_repo import get_student_topic_progress
-                prog_cached = get_student_topic_progress(str(user.id), subject_id_resolved)
-                _sc_prog.set_session_progress(str(user.id), sid_int_prog, prog_cached)
+                prog_cached = get_student_topic_progress(str(user.id), sid_int_prog)
+                if prog_cached:
+                    _sc_prog.set_session_progress(str(user.id), sid_int_prog, prog_cached)
             if prog_cached:
                 lines = []
                 if prog_cached.get("mastered"):
@@ -1022,14 +1023,16 @@ def _post_generation_pipeline(
             daemon=True,
         ).start()
 
-        # ── Topic mastery (background, busts progress cache on update) ────────
+        # ── Topic mastery (background persistence) ───────────────────────────
         if topic_id and generation_mode == "curriculum":
             _sid_bg = int(subject_id_resolved) if subject_id_resolved else 0
             _uid_bg = str(user.id)
             def _update_mastery_bg(_uid=_uid_bg, _tid=topic_id, _bloom=student_bloom, _sc_ref=_sc, _sid=_sid_bg):
                 try:
                     update_topic_mastery_from_chat(_uid, _tid, _bloom)
-                    _sc_ref._safe_del(f"sess:progress:{_uid}:{_sid}")
+                    # Note: We do NOT delete progress cache on every chat turn.
+                    # Topic progress is cached for the session (4h TTL) and refreshed
+                    # upon quiz completion or deep session sync, keeping chat TTFT at sub-second speeds.
                 except Exception as _e:
                     logger.warning(f"Topic mastery update failed: {_e}")
             threading.Thread(target=_update_mastery_bg, daemon=True).start()
