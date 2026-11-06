@@ -64,9 +64,10 @@ class Settings(BaseSettings):
         "http://localhost:8000,"
         "http://localhost:8080,"
         "https://vishwalpha-ai-tutor-production.up.railway.app,"
+        "https://vishwalpha-ai-tutor.onrender.com,"
         "https://vishwalpha-ai-tutor.vercel.app"
     )
-    ALLOWED_ORIGIN_REGEX: str = r"^https?:\/\/(.*\.vercel\.app|.*\.railway\.app|localhost(:\d+)?)$"
+    ALLOWED_ORIGIN_REGEX: str = r"^https?:\/\/(.*\.vercel\.app|.*\.railway\.app|.*\.onrender\.com|localhost(:\d+)?)$"
 
 
 @lru_cache(maxsize=1)

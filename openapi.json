@@ -18,6 +18,10 @@
       "description": "Local development"
     },
     {
+      "url": "https://vishwalpha-ai-tutor.onrender.com",
+      "description": "Production (Render)"
+    },
+    {
       "url": "https://vishwalpha-ai-tutor-production.up.railway.app",
       "description": "Production (Railway)"
     }
@@ -2236,6 +2240,26 @@
             "HTTPBearer": []
           }
         ]
+      }
+    },
+    "/": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Root endpoint",
+        "description": "Returns service metadata and links to documentation and health check.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
       }
     },
     "/health": {

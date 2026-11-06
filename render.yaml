@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: vishwalpha-backend
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+

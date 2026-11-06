@@ -150,6 +150,7 @@ def create_app() -> FastAPI:
         },
         servers=[
             {"url": "http://localhost:8000", "description": "Local development"},
+            {"url": "https://vishwalpha-ai-tutor.onrender.com", "description": "Production (Render)"},
             {"url": "https://vishwalpha-ai-tutor-production.up.railway.app", "description": "Production (Railway)"},
         ],
         lifespan=lifespan,
@@ -213,6 +214,21 @@ def create_app() -> FastAPI:
     class HealthResponse(BaseModel):
         status: Literal["ok"]
         version: str
+
+    @app.get(
+        "/",
+        tags=["System"],
+        summary="Root endpoint",
+        description="Returns service metadata and links to documentation and health check.",
+    )
+    def root():
+        return {
+            "name": "VishwAlpha AI Tutor API",
+            "version": "2.0.0",
+            "status": "healthy",
+            "docs": "/docs",
+            "health": "/health",
+        }
 
     @app.get(
         "/health",
